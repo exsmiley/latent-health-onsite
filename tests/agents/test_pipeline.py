@@ -339,6 +339,37 @@ async def test_message_with_function_calls_is_a_tool_turn(fake_env):
     assert only(evs, "outcome") == [{"result": "supported", "turns_used": 3}]
 
 
+async def test_search_hits_show_full_text_once(fake_env):
+    client, _ = fake_env(
+        [
+            resp(
+                fc("semantic_search", {"queries": ["Einstein birth"], "top_k": None}, "s1"),
+                fc("keyword_search", {"queries": ["Einstein"], "top_k": None}, "k1"),
+            ),
+            search("Einstein born", call_id="s2"),
+            answer("1879", [101]),
+            verdict("supported"),
+            Stream(["1879 [1]"]),
+        ]
+    )
+    await collect()
+
+    def hits(call: dict, call_id: str) -> list[dict]:
+        [out] = [
+            i["output"] for i in call["input"] if i.get("call_id") == call_id and "output" in i
+        ]
+        return json.loads(out)[0]["hits"]
+
+    # Full text the first time, then only a reference: later in the turn and in later turns.
+    assert hits(client.calls[1], "s1")[0]["text"] == CHUNKS[101].text
+    assert hits(client.calls[1], "k1")[0] == {
+        "chunk_id": 101,
+        "title": "Albert Einstein",
+        "seen": True,
+    }
+    assert hits(client.calls[2], "s2")[0]["seen"] is True
+
+
 async def test_history_is_passed_to_research_and_responder(fake_env):
     history = [
         {"role": "user", "content": "Who was Albert Einstein?"},

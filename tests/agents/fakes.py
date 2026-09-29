@@ -191,7 +191,17 @@ class ToolRecorder:
             return json.dumps({"chunks": found, "articles": []})
         return json.dumps(
             [
-                {"query": q, "hits": [{"chunk_id": 101, "title": "Albert Einstein"}]}
+                {
+                    "query": q,
+                    "hits": [
+                        {
+                            "chunk_id": 101,
+                            "title": "Albert Einstein",
+                            "text": CHUNKS[101].text,
+                            "token_count": 20,
+                        }
+                    ],
+                }
                 for q in args.get("queries", [])
             ]
         )

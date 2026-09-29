@@ -46,7 +46,7 @@ Full-dataset chunking gives 384k chunks: p50 111 / p90 276 / max 6.9k tokens, 54
 | `rag.tools.search` | tools | `async semantic_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` embeds all queries in one request, then runs the per-query vector searches concurrently. |
 | `rag.tools.keyword` | tools | `async keyword_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` uses Postgres FTS (`websearch_to_tsquery('english', q)` against `chunks.tsv`, ranked by `ts_rank_cd`), with the queries run concurrently. |
 | `rag.tools.fetch` | tools | `async fetch(chunk_ids: list[int] = [], article_ids: list[int] = []) -> FetchResult`. Articles return full text, uncapped, plus their `chunk_ids`. |
-| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`) and `async dispatch(name: str, args: dict) -> str` (runs a tool and returns the compact JSON string given back to the model). |
+| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`), `async dispatch(name: str, args: dict) -> str` (runs a tool and returns a compact JSON string; search hits carry full `text` and `token_count`) and `present(outputs: list[tuple[str, str]], shown: set[int]) -> list[str]` (shapes one turn's outputs for the model, see "Search hits"). |
 | `rag.agents.*` | agents | See below. |
 | `rag.api.app` | agents | FastAPI `app`. See the HTTP/SSE contract. |
 | `frontend/` | frontend | Chat UI. |
@@ -56,6 +56,21 @@ Result models live in `rag.tools.models` (`SearchHit`, `QueryResults`, `Chunk`, 
 (keyword). The keyword `score` is `ts_rank_cd`, so it is not comparable across queries or with
 semantic scores. The blurb is the first `blurb_words` (40) words of `chunks.text`, followed by "…" if
 truncated.
+
+### Search hits
+
+Hits carry full chunk text so the agent can cite straight from a search, without a fetch turn.
+After all of a turn's tool calls finish, `registry.present` shapes the search outputs (in call
+order) against the agent's `shown` set (chunk ids whose full text the model has already seen):
+
+- The first `hit_full_text` (3) hits of each query not already in `shown` get `text`, picked
+  rank by rank across every query of both search tools until `hit_text_budget_tokens` (5000,
+  by `chunks.token_count`) is spent. Chunks that don't fit are skipped.
+- Every other hit gets a `blurb`, and must be fetched before it is cited.
+- A chunk already listed earlier in the turn, or in `shown`, gets only `"seen": true` (no text).
+- Chunks returned by `fetch` (including an article's `chunk_ids`) are added to `shown`.
+
+Each hit keeps `chunk_id, article_id, title, section, score`. The UI summary is unchanged.
 
 ## Agent pipeline
 
@@ -87,6 +102,8 @@ out of turns ──► fixed "couldn't find" reply
   says what was searched and what was missing, and `answer`/`citations` are empty. It may
   answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
   search has run. The system prompt must explain that:
+  - full-text hits can be cited directly, blurb-only hits must be fetched first, and `seen`
+    hits refer to text shown earlier;
   - it should prefer fetching specific chunks over whole articles;
   - **citations must be chunk ids**, and the evaluator sees only the cited chunk text and will
     not accept whole articles;
