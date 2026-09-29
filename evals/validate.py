@@ -93,7 +93,9 @@ def check_shape(q: dict, where: str, errors: list[str]) -> None:
         if isinstance(sc, list) and isinstance(q.get("breadth"), int):
             arts = {c.get("article_id") for c in sc if isinstance(c, dict)}
             if q["breadth"] != len(arts):
-                errors.append(f"{where}: breadth {q['breadth']} != {len(arts)} distinct supporting articles")
+                errors.append(
+                    f"{where}: breadth {q['breadth']} != {len(arts)} distinct supporting articles"
+                )
     else:
         if "tier" in q:
             errors.append(f"{where}: unknown tier {q.get('tier')!r}")
@@ -117,7 +119,9 @@ def check_shape(q: dict, where: str, errors: list[str]) -> None:
                 continue
             for key, typ in CHUNK_REQUIRED.items():
                 if not isinstance(c.get(key), typ):
-                    errors.append(f"{where}: supporting_chunks[{j}].{key} missing or not {typ.__name__}")
+                    errors.append(
+                        f"{where}: supporting_chunks[{j}].{key} missing or not {typ.__name__}"
+                    )
             if "section" not in c or not (c["section"] is None or isinstance(c["section"], str)):
                 errors.append(f"{where}: supporting_chunks[{j}].section must be str or null")
             if isinstance(c.get("evidence"), str) and not c["evidence"].strip():
@@ -157,9 +161,16 @@ def n_articles(q: dict) -> int:
 
 def summarize(path: Path, questions: list[dict]) -> None:
     n_chunks = sum(len(q.get("supporting_chunks", [])) for q in questions)
-    distinct = {c.get("chunk_id") for q in questions for c in q.get("supporting_chunks", []) if isinstance(c, dict)}
-    print(f"\n=== {path.name}: {len(questions)} questions, {n_chunks} supporting chunks "
-          f"({len(distinct)} distinct), {sum(n_articles(q) > 1 for q in questions)} span 2+ articles")
+    distinct = {
+        c.get("chunk_id")
+        for q in questions
+        for c in q.get("supporting_chunks", [])
+        if isinstance(c, dict)
+    }
+    print(
+        f"\n=== {path.name}: {len(questions)} questions, {n_chunks} supporting chunks "
+        f"({len(distinct)} distinct), {sum(n_articles(q) > 1 for q in questions)} span 2+ articles"
+    )
     total = max(len(questions), 1)
     main_qs = [q for q in questions if not is_super(q)]
     super_qs = [q for q in questions if is_super(q)]
@@ -233,9 +244,13 @@ async def main(paths: list[Path]) -> int:
                 errors.append(f"{where}: chunk does not exist")
                 continue
             if row["article_id"] != c.get("article_id"):
-                errors.append(f"{where}: article_id {c.get('article_id')} != DB {row['article_id']}")
+                errors.append(
+                    f"{where}: article_id {c.get('article_id')} != DB {row['article_id']}"
+                )
             if row["chunk_index"] != c.get("chunk_index"):
-                errors.append(f"{where}: chunk_index {c.get('chunk_index')} != DB {row['chunk_index']}")
+                errors.append(
+                    f"{where}: chunk_index {c.get('chunk_index')} != DB {row['chunk_index']}"
+                )
             if row["title"] != c.get("title"):
                 errors.append(f"{where}: title {c.get('title')!r} != DB {row['title']!r}")
             if row["section"] != c.get("section"):

@@ -3,6 +3,8 @@
 Every model call in rag.agents goes through `create` or `stream_text`, and both get the client
 from `get_client`, so tests only have to replace `get_client` with a fake whose
 `responses.create(**kwargs)` mimics the SDK.
+
+Token usage of both is added to the optional `track_usage()` accumulator (see rag.usage).
 """
 
 from collections.abc import AsyncIterator
@@ -12,6 +14,9 @@ from openai.types.responses import Response
 
 from rag import llm
 from rag.config import get_settings
+from rag.usage import Usage, record_response, track_usage
+
+__all__ = ["ModelError", "Usage", "create", "get_client", "stream_text", "track_usage"]
 
 
 class ModelError(RuntimeError):
@@ -25,7 +30,9 @@ def get_client() -> Any:
 async def create(**kwargs: Any) -> Response:
     """One non-streaming Responses API call using `settings.chat_model`."""
     kwargs.setdefault("model", get_settings().chat_model)
-    return await get_client().responses.create(**kwargs)
+    response = await get_client().responses.create(**kwargs)
+    record_response(getattr(response, "usage", None))  # no-op unless track_usage() is active
+    return response
 
 
 async def stream_text(**kwargs: Any) -> AsyncIterator[str]:
@@ -49,6 +56,8 @@ async def stream_text(**kwargs: Any) -> AsyncIterator[str]:
             elif etype == "response.output_text.delta":
                 if event.item_id not in skip_items and event.delta:
                     yield event.delta
+            elif etype == "response.completed":
+                record_response(getattr(getattr(event, "response", None), "usage", None))
             elif etype == "error":
                 raise ModelError(f"Model stream error: {event.message}")
             elif etype == "response.failed":
