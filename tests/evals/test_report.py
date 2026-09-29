@@ -97,6 +97,7 @@ def test_summarize_groups_and_lists():
     depth = s["by_tier"]["super_hard"]["by_sequential_depth"]
     assert list(depth) == ["1", "3"]
     assert depth["3"]["n"] == 2 and depth["3"]["accuracy"] == 0.5
+    assert "by_min_turns_estimate" not in s["by_tier"]["super_hard"]  # none recorded
     assert [x["id"] for x in s["slowest"]] == ["s2", "s3", "s1", "m2", "m1"]
     assert [w["id"] for w in s["wrong"]] == ["m2", "s2", "s3"]
     assert s["overall"]["n"] == 5

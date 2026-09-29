@@ -299,35 +299,42 @@ Each run writes two files to `evals/results/` (git-ignored):
 - `<UTC timestamp>_<label>.jsonl`: one record per question, appended as each question finishes.
   - `outcome`: `supported`, `not_found`, `out_of_turns` (from the pipeline's `outcome` event),
     `error` or `timeout`. Also `turns_used`, the `final_answer`, every `research_answers` and
-    `evaluations` event, the `tool_calls`, and the cited chunks with their `article_id` and
-    `chunk_index`.
+    `evaluations` event, the `tool_calls` (with their turn), `evaluator_rejections`,
+    `invalid_answers`, and the cited chunks with their `article_id` and `chunk_index`.
   - `timing` (seconds from the start of the question, `time.perf_counter()` as events arrive):
     `total_s` (start to `done`), `first_token_s` (first answer token), `research_turns` (each
-    turn, from its `status` event to the next `status` event), `evaluator_calls`, and
+    turn, from its `status` event to the next `status` event, split into `model_s`, up to the
+    turn's first `tool_call`/`research_answer` event, and `tools_s`, from there to its last
+    `tool_result`), `evaluator_calls`, and
     `responder_first_token_s` / `responder_total_s` (from the respond `status`; supported only).
   - `usage`: tokens summed over all pipeline model calls (`input_tokens` includes
     `cached_input_tokens`, `output_tokens` includes `reasoning_tokens`) plus embedding calls.
     `judge_usage` is counted separately.
   - `grading`: `exact`, `judge` (`{correct, partially_correct, reason}`), `correct` (the judge's
-    verdict, or `exact` with `--no-judge` or if the judge call fails), `partially_correct`,
-    `citation_recall`, `citation_any_overlap` and `citation_article_recall`.
+    verdict, or `exact` with `--no-judge` or if the judge call fails), `method` (`judge`,
+    `exact`, or `no_answer` when there was no answer to judge), `partially_correct`,
+    `citation_recall`, `citation_precision`, `citation_any_overlap` and
+    `citation_article_recall`.
 - `<same stem>.summary.json`: the run config (set, max_turns, concurrency, timeout, model names,
   git commit, wall-clock time) and the summary statistics printed at the end.
 
 ### Reading the summary
 
 The printed table has one row per question `type` within each tier (`main`, or the `tier` field
-of super-hard questions), plus an `ALL` row. Super-hard tiers also get a table by
-`sequential_depth`.
+of super-hard questions), plus an `ALL` row. A tier with several difficulties also gets a table
+by `difficulty`, and the super-hard tier gets tables by `sequential_depth` and by
+`min_turns_estimate` (the breaking-point curve).
 
 - `acc`: final correctness (the judge). `exact`: normalized exact match. `part`: the judge's
   partially-correct rate (some parts of a multi-part answer right).
-- `turns`: mean research turns used. `t_med` / `t_p90` / `t_max`: total time per question.
+- `turns` / `trn90`: mean and p90 research turns used. `t_med` / `t_p90` / `t_max`: total
+  wall-clock time per question.
 - `tok_in` / `cached` / `tok_out`: mean tokens per question. `cost` is shown only when prices
   are configured (see below).
 - `outcomes`: `sup` supported, `nf` not found, `oot` out of turns, `err` error, `to` timeout.
 
-Then come a "where the time goes" line (mean research-turn and evaluator-call time, responder
+Then come a "where the time goes" line (mean research-turn time split into model call and
+tool execution, mean evaluator-call time, responder
 time to first token and total), the citation diagnostics, the 5 slowest questions and every
 wrong answer with what was expected and what the judge said.
 
@@ -338,9 +345,12 @@ same concurrency.
 - *Exact match*: the answer, the answer without its parenthetical note, or any alias must occur
   in the final answer after normalization (casefold, accents, punctuation and a/an/the removed,
   whole words only). For an expected answer with `;`-separated parts, every part must occur.
-- *Judge*: `settings.chat_model` with a strict JSON schema. It judges factual agreement with
-  the expected answer only, not style. Not-found replies, errors and timeouts are wrong without
-  a judge call.
+- *Judge*: `settings.chat_model` with a strict JSON schema. It sees the question, the expected
+  answer, the aliases, the question's `notes` and the final answer, and judges factual
+  agreement with the expected answer only, not style. Not-found replies, errors and timeouts
+  are wrong without a judge call. Every supported answer is judged (not only exact-match
+  misses), so `exact` and the judge can be compared; exact match undercounts list answers
+  written in prose, e.g. "Corsica, Elba and Saint Helena".
 - *Citation recall* matches cited chunks to `supporting_chunks` on `(article_id, chunk_index)`.
   The supporting chunks are one sufficient route, not the only one, so treat it as a
   diagnostic, not as correctness.

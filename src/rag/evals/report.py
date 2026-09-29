@@ -62,7 +62,8 @@ def group_stats(recs: list[dict]) -> dict:
     totals = [_t(r).get("total_s") for r in recs]
     usage = [r.get("usage") or {} for r in recs]
     costs = [r.get("cost_usd") for r in recs]
-    turn_durs = [x["s"] for r in recs for x in _t(r).get("research_turns", [])]
+    turns = [x for r in recs for x in _t(r).get("research_turns", [])]
+    turn_durs = [x["s"] for x in turns]
     eval_durs = [x["s"] for r in recs for x in _t(r).get("evaluator_calls", [])]
     outcomes = Counter(r.get("outcome", "error") for r in recs)
     return {
@@ -72,6 +73,8 @@ def group_stats(recs: list[dict]) -> dict:
         "partial_rate": _rd(_rate([_g(r).get("partially_correct", False) for r in recs])),
         "outcomes": {o: outcomes.get(o, 0) for o in OUTCOMES},
         "turns_mean": _rd(_mean([r.get("turns_used") for r in recs]), 2),
+        "turns_p90": _rd(percentile([r.get("turns_used") for r in recs], 90), 1),
+        "evaluator_rejections_mean": _rd(_mean([r.get("evaluator_rejections") for r in recs]), 2),
         "time_s": {
             "median": _rd(_median(totals), 1),
             "p90": _rd(percentile(totals, 90), 1),
@@ -80,6 +83,8 @@ def group_stats(recs: list[dict]) -> dict:
         },
         "first_token_s_median": _rd(_median([_t(r).get("first_token_s") for r in recs]), 1),
         "research_turn_s_mean": _rd(_mean(turn_durs), 2),
+        "research_model_s_mean": _rd(_mean([x.get("model_s") for x in turns]), 2),
+        "research_tools_s_mean": _rd(_mean([x.get("tools_s") for x in turns]), 2),
         "evaluator_call_s_mean": _rd(_mean(eval_durs), 2),
         "responder_first_token_s_median": _rd(
             _median([_t(r).get("responder_first_token_s") for r in recs]), 2
@@ -91,6 +96,7 @@ def group_stats(recs: list[dict]) -> dict:
         if any(c is not None for c in costs)
         else None,
         "citation_recall_mean": _rd(_mean([_g(r).get("citation_recall") for r in recs])),
+        "citation_precision_mean": _rd(_mean([_g(r).get("citation_precision") for r in recs])),
         "citation_any_overlap_rate": _rd(
             _rate([_g(r).get("citation_any_overlap", False) for r in recs])
         ),
@@ -104,6 +110,14 @@ def _by(recs: list[dict], key: str) -> dict[str, list[dict]]:
     return dict(sorted(groups.items()))
 
 
+def _by_number(recs: list[dict], key: str) -> dict[str, dict]:
+    groups: dict = {}
+    for r in recs:
+        groups.setdefault(r.get(key), []).append(r)
+    ordered = sorted(groups.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+    return {str(k): group_stats(rs) for k, rs in ordered}
+
+
 def summarize(records: list[dict]) -> dict:
     by_tier = {}
     for tier, recs in _by(records, "tier").items():
@@ -111,14 +125,13 @@ def summarize(records: list[dict]) -> dict:
             "all": group_stats(recs),
             "by_type": {t: group_stats(rs) for t, rs in _by(recs, "type").items()},
         }
-        if any(r.get("sequential_depth") is not None for r in recs):
-            depth = {}
-            for r in recs:
-                depth.setdefault(r.get("sequential_depth"), []).append(r)
-            entry["by_sequential_depth"] = {
-                str(d): group_stats(rs)
-                for d, rs in sorted(depth.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+        if len({r.get("difficulty") for r in recs}) > 1:
+            entry["by_difficulty"] = {
+                d: group_stats(rs) for d, rs in _by(recs, "difficulty").items()
             }
+        for key in ("sequential_depth", "min_turns_estimate"):
+            if any(r.get(key) is not None for r in recs):
+                entry[f"by_{key}"] = _by_number(recs, key)
         by_tier[tier] = entry
     slowest = sorted(records, key=lambda r: -(_t(r).get("total_s") or 0))[:5]
     wrong = [r for r in records if not _g(r).get("correct")]
@@ -173,7 +186,7 @@ def _outcomes(o: dict) -> str:
 
 
 HEADER = (
-    f"{'group':<22} {'n':>3} {'acc':>5} {'exact':>5} {'part':>5} {'turns':>5} "
+    f"{'group':<22} {'n':>3} {'acc':>5} {'exact':>5} {'part':>5} {'turns':>5} {'trn90':>5} "
     f"{'t_med':>6} {'t_p90':>6} {'t_max':>6} {'tok_in':>8} {'cached':>8} {'tok_out':>7} "
     f"{'cost':>7}  outcomes"
 )
@@ -184,7 +197,8 @@ def _row(name: str, s: dict) -> str:
     cost = "-" if s["cost_usd_mean"] is None else f"${s['cost_usd_mean']:.3f}"
     return (
         f"{_short(name, 22):<22} {s['n']:>3} {_pct(s['accuracy']):>5} {_pct(s['exact_rate']):>5} "
-        f"{_pct(s['partial_rate']):>5} {_num(s['turns_mean']):>5} {_num(tm['median']):>6} "
+        f"{_pct(s['partial_rate']):>5} {_num(s['turns_mean']):>5} {_num(s['turns_p90']):>5} "
+        f"{_num(tm['median']):>6} "
         f"{_num(tm['p90']):>6} {_num(tm['max']):>6} {_num(tk['input_tokens'], '.0f'):>8} "
         f"{_num(tk['cached_input_tokens'], '.0f'):>8} {_num(tk['output_tokens'], '.0f'):>7} "
         f"{cost:>7}  {_outcomes(s['outcomes'])}"
@@ -207,10 +221,15 @@ def render(records: list[dict], summary: dict, config: dict | None = None) -> st
         for t, s in entry["by_type"].items():
             lines.append(_row(t, s))
         lines.append(_row("ALL", entry["all"]))
-        if "by_sequential_depth" in entry:
-            lines += ["", "  by sequential_depth:", HEADER]
-            for d, s in entry["by_sequential_depth"].items():
-                lines.append(_row(f"depth={d}", s))
+        for key, prefix in (
+            ("difficulty", ""),
+            ("sequential_depth", "depth="),
+            ("min_turns_estimate", "min_turns="),
+        ):
+            if f"by_{key}" in entry:
+                lines += ["", f"  by {key}:", HEADER]
+                for d, s in entry[f"by_{key}"].items():
+                    lines.append(_row(f"{prefix}{d}", s))
     if len(summary["by_tier"]) > 1:
         lines += ["", HEADER, _row("OVERALL", summary["overall"])]
 
@@ -219,7 +238,9 @@ def render(records: list[dict], summary: dict, config: dict | None = None) -> st
         "",
         (
             "Where the time goes (overall): "
-            f"research turn mean {_num(o['research_turn_s_mean'], '.2f')}s, "
+            f"research turn mean {_num(o['research_turn_s_mean'], '.2f')}s "
+            f"(model {_num(o['research_model_s_mean'], '.2f')}s + "
+            f"tools {_num(o['research_tools_s_mean'], '.2f')}s), "
             f"evaluator call mean {_num(o['evaluator_call_s_mean'], '.2f')}s, "
             f"responder first token median {_num(o['responder_first_token_s_median'], '.2f')}s / "
             f"total median {_num(o['responder_total_s_median'], '.2f')}s, "
@@ -227,6 +248,7 @@ def render(records: list[dict], summary: dict, config: dict | None = None) -> st
         ),
         (
             f"Citations (diagnostic): recall mean {_pct(o['citation_recall_mean'])}, "
+            f"precision mean {_pct(o['citation_precision_mean'])}, "
             f"any overlap {_pct(o['citation_any_overlap_rate'])}"
         ),
     ]

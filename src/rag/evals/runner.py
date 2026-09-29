@@ -127,14 +127,38 @@ class _Trace:
     # open intervals
     _research: tuple[int, float] | None = None
     _evaluate: tuple[int, float] | None = None
+    _model_done: float | None = None  # first tool_call / research_answer of the open turn
+    _last_tool: float | None = None  # last tool_result of the open turn
 
     def now(self) -> float:
         return time.perf_counter() - self.t0
 
+    def open_research(self, turn: int, t: float) -> None:
+        self._research, self._model_done, self._last_tool = (turn, t), None, None
+
+    def mark_model_done(self, t: float) -> None:
+        if self._research is not None and self._model_done is None:
+            self._model_done = t
+
     def close_research(self, t: float) -> None:
+        """A turn = its `status` to the next `status` (or done/error). `model_s` runs to the
+        turn's first tool_call/research_answer event (for an answer, that includes checking the
+        citations in the DB); `tools_s` from there to the last tool_result."""
         if self._research is not None:
             turn, start = self._research
-            self.research_turns.append({"turn": turn, "s": round(t - start, 3)})
+            md = self._model_done
+            self.research_turns.append(
+                {
+                    "turn": turn,
+                    "s": round(t - start, 3),
+                    "model_s": None if md is None else round(md - start, 3),
+                    "tools_s": (
+                        None
+                        if md is None or self._last_tool is None
+                        else round(self._last_tool - md, 3)
+                    ),
+                }
+            )
             self._research = None
 
 
@@ -184,7 +208,7 @@ async def run_question(
                         if ev.type == "status":
                             tr.close_research(t)
                             if d["stage"] == "research":
-                                tr._research = (d["turn"], t)
+                                tr.open_research(d["turn"], t)
                             elif d["stage"] == "evaluate":
                                 tr._evaluate = (d["turn"], t)
                             elif d["stage"] == "respond":
@@ -202,9 +226,13 @@ async def run_question(
                                 tr._evaluate = None
                             events["evaluations"].append(d)
                         elif ev.type == "research_answer":
+                            tr.mark_model_done(t)
                             events["research_answers"].append(d)
                         elif ev.type == "tool_call":
+                            tr.mark_model_done(t)
                             events["tool_calls"].append({"turn": d["turn"], "name": d["name"]})
+                        elif ev.type == "tool_result":
+                            tr._last_tool = t
                         elif ev.type == "outcome":
                             outcome_event = d
                         elif ev.type == "citations":
@@ -258,6 +286,8 @@ async def run_question(
             "research_answers": events["research_answers"],
             "evaluations": events["evaluations"],
             "tool_calls": events["tool_calls"],
+            "evaluator_rejections": sum(e["verdict"] != "supported" for e in events["evaluations"]),
+            "invalid_answers": sum(a["status"] == "invalid" for a in events["research_answers"]),
             "timing": {
                 "total_s": _r(end_s),
                 "first_token_s": _r(tr.first_token_s),
@@ -303,7 +333,9 @@ async def run_question(
         if supported and final_answer.strip():
             with track_usage() as ju:
                 try:
-                    j = await grading.judge(q["question"], exp_answer, aliases, final_answer)
+                    j = await grading.judge(
+                        q["question"], exp_answer, aliases, final_answer, q.get("notes", "")
+                    )
                     judgement = j.model_dump()
                 except Exception as exc:  # noqa: BLE001 - fall back to exact match
                     judgement = {"error": f"{type(exc).__name__}: {exc}"}
@@ -316,9 +348,11 @@ async def run_question(
             }
     if judgement is not None and "correct" in judgement:
         correct, partial = judgement["correct"], judgement["partially_correct"]
+        method = "judge" if judge_usage is not None else "no_answer"
     else:
         correct, partial = exact, False
-    recall, overlap, article_recall = grading.citation_recall(
+        method = "exact"
+    recall, overlap, article_recall, precision = grading.citation_recall(
         [c for c in q.get("supporting_chunks", []) if "chunk_index" in c],
         [c for c in cited if c["chunk_index"] is not None],
     )
@@ -327,9 +361,11 @@ async def run_question(
         "judge": judgement,
         "correct": correct,
         "partially_correct": partial,
+        "method": method,
         "citation_recall": _r(recall),
         "citation_any_overlap": overlap,
         "citation_article_recall": _r(article_recall),
+        "citation_precision": _r(precision),
     }
     rec["judge_usage"] = judge_usage
     rec["cost_usd"] = pricing.cost(pipeline_usage) if pricing else None

@@ -50,9 +50,10 @@ def test_citation_recall():
         {"article_id": 5, "chunk_index": 1},  # duplicate entry counts once
     ]
     cited = [{"article_id": 1, "chunk_index": 2}, {"article_id": 9, "chunk_index": 0}]
-    recall, overlap, art = citation_recall(expected, cited)
+    recall, overlap, art, precision = citation_recall(expected, cited)
     assert recall == 1 / 3
     assert overlap is True
     assert art == 1 / 2
-    assert citation_recall(expected, []) == (0.0, False, 0.0)
-    assert citation_recall([], cited) == (None, False, None)
+    assert precision == 1 / 2
+    assert citation_recall(expected, []) == (0.0, False, 0.0, None)
+    assert citation_recall([], cited) == (None, False, None, None)

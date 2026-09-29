@@ -36,6 +36,7 @@ def question(qid, text, answer_="1879", aliases=None):
         "difficulty": "easy",
         "hops": 1,
         "tier": "main",
+        "notes": f"note for {qid}",
         "supporting_chunks": [
             {"chunk_id": 999, "article_id": 1, "chunk_index": 0},
             {"chunk_id": 998, "article_id": 1, "chunk_index": 5},
@@ -114,6 +115,12 @@ async def test_runs_questions_concurrently_and_records(fake_env, tmp_path):
     t = ok["timing"]
     assert [x["turn"] for x in t["research_turns"]] == [1, 2]
     assert all(x["s"] >= 0 for x in t["research_turns"])
+    tool_turn, answer_turn = t["research_turns"]
+    # the tool turn splits into model call + tool execution (the fake tools sleep 20ms)
+    assert tool_turn["tools_s"] >= 0.015
+    assert tool_turn["model_s"] + tool_turn["tools_s"] <= tool_turn["s"] + 1e-3
+    assert answer_turn["model_s"] is not None and answer_turn["tools_s"] is None
+    assert ok["evaluator_rejections"] == 0 and ok["invalid_answers"] == 0
     assert [(x["turn"], x["verdict"]) for x in t["evaluator_calls"]] == [(2, "supported")]
     assert 0 <= t["responder_first_token_s"] <= t["responder_total_s"]
     assert 0 < t["first_token_s"] <= t["total_s"]
@@ -127,7 +134,9 @@ async def test_runs_questions_concurrently_and_records(fake_env, tmp_path):
     assert g["exact"] is True and g["correct"] is True
     assert g["judge"]["reason"] == "same year"
     assert g["citation_recall"] == 0.5 and g["citation_any_overlap"] is True
+    assert g["citation_precision"] == 1.0 and g["method"] == "judge"
     assert len(judge_calls) == 1 and Q_OK in last_input_text(judge_calls[0])
+    assert "NOTES:\nnote for q1" in last_input_text(judge_calls[0])
 
     nf = by_id["q2"]
     assert nf["outcome"] == "not_found"
@@ -137,6 +146,7 @@ async def test_runs_questions_concurrently_and_records(fake_env, tmp_path):
     assert nf["timing"]["first_token_s"] is not None  # the fixed "couldn't find" reply
     assert nf["grading"]["correct"] is False and nf["grading"]["exact"] is False
     assert nf["citations"] == [] and nf["grading"]["citation_recall"] == 0.0
+    assert nf["grading"]["method"] == "no_answer"
 
     err = by_id["q3"]
     assert err["outcome"] == "error"

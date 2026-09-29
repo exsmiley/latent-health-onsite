@@ -57,21 +57,23 @@ def exact_match(answer: str, aliases: list[str], response: str) -> bool:
 
 def citation_recall(
     expected: list[dict], cited: list[dict]
-) -> tuple[float | None, bool, float | None]:
-    """(chunk recall, any chunk overlap, article recall) of cited vs expected supporting chunks.
+) -> tuple[float | None, bool, float | None, float | None]:
+    """(chunk recall, any chunk overlap, article recall, chunk precision) of cited vs expected
+    supporting chunks.
 
     Chunks match on (article_id, chunk_index), which survives re-ingest; chunk_id doesn't.
     """
     exp = {(c["article_id"], c["chunk_index"]) for c in expected}
     got = {(c["article_id"], c["chunk_index"]) for c in cited}
     if not exp:
-        return None, False, None
+        return None, False, None, None
     exp_articles = {a for a, _ in exp}
     got_articles = {a for a, _ in got}
     return (
         len(exp & got) / len(exp),
         bool(exp & got),
         len(exp_articles & got_articles) / len(exp_articles),
+        len(exp & got) / len(got) if got else None,
     )
 
 
@@ -98,6 +100,9 @@ correct to false.
 different number is wrong.
 - A reply saying the answer couldn't be found, or refusing, is incorrect (correct=false, \
 partially_correct=false).
+- The NOTES (when given) are the question author's notes: accepted approximations, pinned \
+answers and caveats where the corpus differs from reality. Use them to interpret the expected \
+answer.
 - correct=true implies partially_correct=false.
 Give a one or two sentence reason."""
 
@@ -119,21 +124,28 @@ class Judgement(BaseModel):
     reason: str
 
 
-def judge_input(question: str, answer: str, aliases: list[str], response: str) -> str:
+def judge_input(
+    question: str, answer: str, aliases: list[str], response: str, notes: str = ""
+) -> str:
     alias_text = "\n".join(f"- {a}" for a in aliases) or "(none)"
     return (
         f"QUESTION:\n{question}\n\n"
         f"EXPECTED ANSWER:\n{answer}\n\n"
         f"ALIASES:\n{alias_text}\n\n"
+        f"NOTES:\n{notes.strip() or '(none)'}\n\n"
         f"SYSTEM ANSWER:\n{response}"
     )
 
 
-async def judge(question: str, answer: str, aliases: list[str], response: str) -> Judgement:
+async def judge(
+    question: str, answer: str, aliases: list[str], response: str, notes: str = ""
+) -> Judgement:
     """One strict-JSON call with `settings.chat_model`. Raises ValueError on an unusable reply."""
     result: Any = await model.create(
         instructions=JUDGE_PROMPT,
-        input=[{"role": "user", "content": judge_input(question, answer, aliases, response)}],
+        input=[
+            {"role": "user", "content": judge_input(question, answer, aliases, response, notes)}
+        ],
         text={
             "format": {
                 "type": "json_schema",
