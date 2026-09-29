@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "ts": {
+      "format": "%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+      "datefmt": "%H:%M:%S"
+    }
+  },
+  "handlers": {
+    "stderr": {"class": "logging.StreamHandler", "formatter": "ts", "stream": "ext://sys.stderr"}
+  },
+  "loggers": {
+    "uvicorn": {"handlers": ["stderr"], "level": "INFO", "propagate": false},
+    "uvicorn.error": {"level": "INFO"},
+    "uvicorn.access": {"handlers": ["stderr"], "level": "WARNING", "propagate": false},
+    "httpx": {"handlers": ["stderr"], "level": "INFO", "propagate": false},
+    "httpx2": {"handlers": ["stderr"], "level": "INFO", "propagate": false},
+    "openai": {"handlers": ["stderr"], "level": "INFO", "propagate": false},
+    "psycopg.pool": {"handlers": ["stderr"], "level": "INFO", "propagate": false},
+    "rag": {"handlers": ["stderr"], "level": "INFO", "propagate": false}
+  },
+  "root": {"handlers": ["stderr"], "level": "WARNING"}
+}
