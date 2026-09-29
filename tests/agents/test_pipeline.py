@@ -19,9 +19,12 @@ from fakes import (
 
 import rag.db
 from rag.agents import orchestrator
-from rag.agents.evaluator import evaluate
+from rag.agents.evaluator import SCHEMA as EVALUATOR_SCHEMA
+from rag.agents.evaluator import SYSTEM_PROMPT as EVALUATOR_PROMPT
+from rag.agents.evaluator import evaluate, format_question
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
 from rag.agents.research import ANSWER_SCHEMA
+from rag.agents.research import SYSTEM_PROMPT as RESEARCH_PROMPT
 from rag.config import get_settings
 from rag.tools import fetch as fetch_tool
 
@@ -423,7 +426,7 @@ async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
     assert "round" not in out
 
 
-async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
+async def test_evaluator_gets_original_and_resolved_question_for_follow_ups(fake_env):
     history = [
         {"role": "user", "content": "Who was Albert Einstein?"},
         {"role": "assistant", "content": "A German-born physicist [1]."},
@@ -445,11 +448,73 @@ async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
     )
     evs = await collect("When was he born?", history)
     ev_text = last_input_text(client.calls[1])
-    assert "QUESTION:\nWhen was Albert Einstein born?" in ev_text
-    assert "When was he born?" not in ev_text
+    # Both, clearly labelled: the user's own words first, then the resolved version.
+    assert "QUESTION (the user's latest message, verbatim" in ev_text
+    assert "When was he born?" in ev_text
+    assert "WITH REFERENCES RESOLVED" in ev_text
+    assert "When was Albert Einstein born?" in ev_text
+    assert ev_text.index("When was he born?") < ev_text.index("When was Albert Einstein born?")
+    assert "never drop a constraint or step" in ev_text
     assert "Who was Albert Einstein" not in ev_text  # still no history for the evaluator
     assert only(evs, "outcome")[0]["result"] == "supported"
     assert "question" in ANSWER_SCHEMA["required"]
+
+
+async def test_evaluator_without_history_gets_original_question_not_rewrite(fake_env):
+    original = "Where does the river that flows through the city where Einstein was born end?"
+    client, _ = fake_env(
+        [
+            final(
+                {
+                    # The agent shortened the chain to its last hop; the evaluator must not
+                    # see that.
+                    "question": "Where does the Danube end?",
+                    "status": "answered",
+                    "answer": "The Black Sea.",
+                    "citations": [101],
+                    "reason": "",
+                }
+            ),
+            verdict("supported"),
+            Stream(["The Black Sea [1]."]),
+        ]
+    )
+    await collect(original)
+    ev_text = last_input_text(client.calls[1])
+    assert ev_text.startswith(f"QUESTION:\n{original}\n\n")
+    assert "Where does the Danube end?" not in ev_text
+    assert "RESOLVED" not in ev_text
+
+
+def test_format_question_labels():
+    assert format_question("Q?") == "QUESTION:\nQ?"
+    both = format_question("When was he born?", "When was Einstein born?")
+    assert both.index("verbatim") < both.index("When was he born?")
+    assert both.index("REFERENCES RESOLVED") < both.index("When was Einstein born?")
+
+
+def test_evaluator_prompt_checks_every_link_and_the_asked_hop():
+    p = EVALUATOR_PROMPT
+    assert "requirements" in p
+    assert "every" in p.lower() and "link" in p
+    assert "A final fact backed by" in p and "NOT enough" in p
+    assert "EVERY entity compared" in p
+    assert "stops a hop short" in p
+    assert "never drop a constraint, a step or a compared entity" in p
+    assert "name each missing link" in p
+    assert EVALUATOR_SCHEMA["required"][0] == "requirements"
+
+
+def test_research_prompt_keeps_question_whole_and_cites_every_hop_and_entity():
+    p = RESEARCH_PROMPT
+    assert "never shorten it" in p and "last hop" in p
+    assert "cite a chunk for EVERY hop" in p
+    assert "cite evidence for EVERY entity compared or counted" in p
+    assert "MINIMAL" in p  # still minimal for simple questions
+    q_desc = ANSWER_SCHEMA["properties"]["question"]["description"]
+    assert "Keep every constraint and every step" in q_desc
+    assert "never shorten it" in q_desc
+    assert "every hop" in ANSWER_SCHEMA["properties"]["citations"]["description"]
 
 
 async def test_citation_check_failure_is_retryable_not_fatal(fake_env, monkeypatch):

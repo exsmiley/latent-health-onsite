@@ -29,8 +29,10 @@ ANSWER_SCHEMA: dict = {
         "question": {
             "type": "string",
             "description": (
-                "The user's latest question rewritten to stand alone: resolve pronouns and "
-                "references to earlier messages. Repeat it unchanged if it already stands alone."
+                "The user's latest question, complete, with only pronouns and references to "
+                "earlier messages resolved. Keep every constraint and every step of the chain; "
+                "never shorten it to a sub-question or to the last hop. Repeat it unchanged if "
+                "it already stands alone."
             ),
         },
         "status": {
@@ -47,7 +49,8 @@ ANSWER_SCHEMA: dict = {
             "items": {"type": "integer"},
             "description": (
                 "The minimal set of chunk ids whose text, read on its own, fully supports every "
-                "claim in the answer ([] for not_found)."
+                "claim in the answer, including every hop of a chain and every entity compared "
+                "([] for not_found)."
             ),
         },
         "reason": {
@@ -98,9 +101,12 @@ preferably in the same turn as other useful calls. Don't give up because of an e
 ## How to answer
 You finish by replying WITHOUT calling any tool. That reply is your final answer and must be \
 a JSON object with exactly these fields:
-- `question`: the user's latest question rewritten to stand alone, e.g. "When did she die?" \
-after a question about Marie Curie becomes "When did Marie Curie die?". The evaluator sees only \
-this question and your cited chunks, never the conversation, so it must be self-contained.
+- `question`: the user's latest question with only pronouns and references to earlier \
+messages resolved, e.g. "When did she die?" after a question about Marie Curie becomes "When \
+did Marie Curie die?". Keep EVERY constraint and step of the user's question: never shorten it \
+to a sub-question or to the last hop of a chain, and never replace a described entity with the \
+one you think it is ("the river that flows through the city where X was born" stays as it is). \
+The evaluator checks your answer against the user's own question.
 - `status`: "answered" or "not_found".
 - `answer`: for "answered", a complete, direct answer to the question. "" for "not_found".
 - `citations`: for "answered", the chunk ids that support the answer. [] for "not_found".
@@ -110,8 +116,10 @@ You can reply with your answer after any turn, as soon as you're ready. While yo
 to research, call tools instead; a reply without tool calls always ends your research.
 
 ## How to work
-1. Plan first. Break the question into the facts you need. For multi-part or comparison \
-questions, cover each part.
+1. Plan first. Break the question into the facts you need. For a chain ("the teacher of the \
+man who...") every link is a fact to find in the index, even when you think you know it. For \
+multi-part or comparison questions, cover each part and each entity. Answer exactly what is \
+asked: count the hops and name the entity at the last one.
 2. Search in parallel. In a single turn, call semantic_search and keyword_search together, each \
 with several queries. You can call several tools in the same turn and they run concurrently. \
 Turns are the scarce resource, not tool calls.
@@ -133,11 +141,18 @@ Never write "not found" or "the sources don't say" as an "answered" answer; use 
 
 ## Citations (read carefully)
 - Citations MUST be chunk ids. Article ids are rejected.
-- The evaluator sees ONLY the question and the text of the chunks you cite. It does not see \
-your searches, other chunks, whole articles, or your reasoning. If a fact is not in a cited \
-chunk's text, then as far as the evaluator knows it is unsupported.
+- The evaluator sees ONLY the user's question and the text of the chunks you cite. It does \
+not see your searches, other chunks, whole articles, or your reasoning. If a fact is not in a \
+cited chunk's text, then as far as the evaluator knows it is unsupported.
 - Cite the MINIMAL set of chunks that TOGETHER fully support the answer: every claim covered, \
-no padding. Usually 1 to 4 chunks. Drop chunks that add nothing.
+no padding. Usually 1 to 4 chunks for a simple question. Drop chunks that add nothing. Two \
+kinds of question need more, because "fully support" covers every step:
+  - Chains: cite a chunk for EVERY hop. The evaluator checks each link of the chain the question \
+describes, from the first entity to the answer. Knowing an intermediate entity yourself is not \
+evidence; if no cited chunk shows a link, the answer is rejected.
+  - Comparisons, superlatives ("oldest", "longest", "first"), counts and "which of these" \
+questions: cite evidence for EVERY entity compared or counted, not just the winner. The \
+evaluator can't confirm "the oldest" without every entity's date.
 - Chunks don't carry context from neighbouring chunks. If a chunk says "He was born in 1879" \
 without naming the person, also cite a chunk that establishes who "he" is, or pick a better \
 chunk.
@@ -161,7 +176,7 @@ citations."""
 
 @dataclass
 class Submission:
-    question: str  # the standalone question the evaluator checks the answer against
+    question: str  # the agent's standalone rewrite (references resolved); see `evaluate`
     answer: str
     citations: list[int]
     chunks: list[Chunk]  # same order as `citations`
@@ -183,12 +198,14 @@ class ResearchAgent:
     not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
     turns_used: int = 0
+    has_history: bool = False  # earlier user/assistant messages precede the question
 
     def __post_init__(self) -> None:
         for msg in self.history:
             role, content = msg.get("role"), msg.get("content")
             if role in ("user", "assistant") and isinstance(content, str) and content:
                 self.items.append({"role": role, "content": content})
+        self.has_history = bool(self.items)
         self.items.append({"role": "user", "content": self.question})
 
     def add_feedback(self, text: str) -> None:
@@ -421,8 +438,8 @@ def retry_feedback(evaluator_feedback: str, independent_answer: str, turns_left:
         )
     parts.append(
         f"{_turns_left(turns_left)} Find the missing evidence (or narrow the answer to what the "
-        "sources support), then reply again with the minimal set of chunk ids that fully "
-        'supports it, or reply "not_found" if the index doesn\'t have it.'
+        "sources support), then reply again with the chunk ids that fully support it (every hop "
+        'of a chain, every entity compared), or reply "not_found" if the index doesn\'t have it.'
     )
     return "\n\n".join(parts)
 

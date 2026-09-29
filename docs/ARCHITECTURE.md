@@ -70,7 +70,7 @@ for turn in 1..7:
     └─ no tool calls   ──► its final message is a structured answer (JSON schema below)
          ├─ invalid (bad JSON, empty/unknown/non-chunk citations) ──► error fed back, next turn
          ├─ status "not_found" ──► fixed "couldn't find" reply, done (no evaluation)
-         └─ status "answered"  ──► Evaluator (sees ONLY question + cited chunk texts from the DB)
+         └─ status "answered"  ──► Evaluator (sees ONLY the user's question + cited chunk texts)
               ├─ supported   ──► Responder ──stream──► user, done
               └─ unsupported ──► feedback added to the conversation, next turn
 out of turns ──► fixed "couldn't find" reply
@@ -81,8 +81,11 @@ out of turns ──► fixed "couldn't find" reply
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
   must match the strict JSON schema `{question: str, status: "answered" | "not_found", answer:
   str, citations: int[], reason: str}`, set via the Responses API `text.format`. `question` is
-  the user's latest question rewritten to stand alone (pronouns and follow-up references
-  resolved). The evaluator is given this question, never the chat history. For "answered",
+  the user's latest question with only pronouns and follow-up references resolved: it must keep
+  every constraint and step, and is never shortened to a sub-question or the last hop of a
+  chain. The evaluator judges against the user's ORIGINAL latest question; the rewrite is given
+  to it only as a second, labelled "references resolved" version when there is chat history
+  (with no history it is ignored). The evaluator never sees the chat history. For "answered",
   `answer` and chunk-id `citations` are required and `reason` is ""; for "not_found", `reason`
   says what was searched and what was missing, and `answer`/`citations` are empty. It may
   answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
@@ -90,7 +93,10 @@ out of turns ──► fixed "couldn't find" reply
   - it should prefer fetching specific chunks over whole articles;
   - **citations must be chunk ids**, and the evaluator sees only the cited chunk text and will
     not accept whole articles;
-  - it should cite the minimal sufficient set of chunks;
+  - it should cite the minimal sufficient set of chunks, except that a chain needs a chunk for
+    every hop, and comparisons, superlatives, counts and "which of these" questions need
+    evidence for every entity compared, not just the winner;
+  - every link of a chain must be found in the index, even if it knows the entity;
   - it should never guess, and should answer "not_found" after about two turns of fruitless
     focused searching;
   - it should answer as early as the evidence allows.
@@ -101,9 +107,17 @@ out of turns ──► fixed "couldn't find" reply
   is ignored. Tool calls made on the last turn are not run: each gets a `tool_result` with
   summary "not run: no turns left".
 - **Evaluator** (`rag.agents.evaluator`). A single model call, with structured JSON output
-  `{independent_answer: str, verdict: "supported" | "unsupported", feedback: str}`. It answers
-  the (standalone) question from the cited chunk texts alone, then judges whether that answer agrees with the
-  research agent's answer. The feedback says what's missing or contradicted. An empty or malformed
+  `{requirements: str, independent_answer: str, verdict: "supported" | "unsupported", feedback:
+  str}`. Its input is the user's original latest question (plus, for follow-ups, the agent's
+  references-resolved version, which may only replace pronouns and references), the cited chunk
+  texts and the candidate answer. It first lists the question's requirements (every link of the
+  chain it describes, every constraint and compared entity, and exactly what is asked: which
+  entity, at which hop), then answers from the cited chunk texts alone, checking that the
+  passages establish EACH link. A final fact backed by the passages is not enough unless they
+  also show it belongs to the thing the question describes. A link backed only by the
+  candidate's claims or by outside knowledge, a compared entity without evidence, or an answer a
+  hop short or too far means `unsupported`. The feedback names the missing link or what's
+  contradicted. An empty or malformed
   evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
   is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.

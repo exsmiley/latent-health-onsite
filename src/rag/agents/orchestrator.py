@@ -57,7 +57,14 @@ async def run(question: str, history: list[dict] | None = None) -> AsyncIterator
             yield events.status(
                 "evaluate", turn, max_turns, "Checking the answer against the cited sources"
             )
-            evaluation = await evaluate(sub.question, sub.answer, sub.chunks)
+            # Judge against the user's own words. The agent's standalone rewrite only helps to
+            # resolve references to earlier turns, so it is passed only for follow-ups.
+            evaluation = await evaluate(
+                question,
+                sub.answer,
+                sub.chunks,
+                resolved_question=sub.question if agent.has_history else None,
+            )
             yield events.evaluation(
                 turn, evaluation.verdict, evaluation.independent_answer, evaluation.feedback
             )
