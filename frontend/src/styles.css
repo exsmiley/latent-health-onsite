@@ -736,6 +736,249 @@ sup {
   color: #fff;
 }
 
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-right: auto;
+}
+.tab {
+  padding: 3px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+.tab:hover {
+  background: var(--surface-2);
+}
+.tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Evals */
+.evals {
+  flex: 1;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+  min-width: 0;
+}
+.evals h1 {
+  font-size: 1.35rem;
+  margin: 0;
+}
+.evals h2 {
+  font-size: 1.05rem;
+  margin: 24px 0 8px;
+}
+.evals-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.run-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.run-meta {
+  margin: 4px 0 16px;
+  font-size: 0.85rem;
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+.tile {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.tile-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.tile-value {
+  font-size: 1.5rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.tile-sub {
+  font-size: 0.78rem;
+}
+.run-line {
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+.run-line strong {
+  margin-right: 6px;
+  color: var(--text);
+}
+.breakdowns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+  gap: 12px 20px;
+}
+.table-wrap {
+  overflow-x: auto;
+  min-width: 0;
+}
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+table.data caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 16px 0 6px;
+}
+table.data th,
+table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+table.data th {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+table.data .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+table.data .strong {
+  font-weight: 650;
+}
+table.data tr.clickable {
+  cursor: pointer;
+}
+table.data tr.clickable:hover,
+table.data tr.open {
+  background: var(--surface-2);
+}
+.nowrap {
+  white-space: nowrap;
+}
+.mono {
+  font-family: var(--mono);
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-weight: 600;
+  text-align: left;
+}
+td .tag {
+  margin-left: 6px;
+}
+.outcomes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pill {
+  display: inline-block;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.pill.supported {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.pill.unsupported,
+.pill.error,
+.pill.timeout {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+.pill.not_found,
+.pill.out_of_turns {
+  color: var(--warn);
+}
+.verdict {
+  font-weight: 700;
+  text-align: center;
+}
+.verdict.correct {
+  color: var(--ok);
+}
+.verdict.partial {
+  color: var(--warn);
+}
+.verdict.wrong {
+  color: var(--bad);
+}
+.questions-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.controls select,
+.controls input {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+.question-cell {
+  min-width: 260px;
+}
+.detail-row > td {
+  background: var(--surface-2);
+}
+.q-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 4px 0 8px;
+}
+.q-detail dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+.q-detail dd {
+  margin: 0;
+}
+.q-detail .turns-table {
+  width: auto;
+  margin-bottom: 8px;
+}
+
 @media (max-width: 560px) {
   .log {
     padding: 16px 12px 8px;
@@ -751,6 +994,9 @@ sup {
   }
   .source-panel {
     margin-left: 0;
+  }
+  .breakdowns {
+    grid-template-columns: 1fr;
   }
   .empty {
     padding-top: 6vh;

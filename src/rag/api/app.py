@@ -1,4 +1,4 @@
-"""FastAPI backend: health, chunk lookup and the streaming chat endpoint (SSE)."""
+"""FastAPI backend: health, chunk lookup, eval results and the streaming chat endpoint (SSE)."""
 
 import asyncio
 import contextlib
@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from rag import db
 from rag.agents import orchestrator
 from rag.agents.events import Event
+from rag.config import get_settings
+from rag.evals import store as eval_store
 from rag.tools import fetch as fetch_tool
 from rag.tools.models import Chunk
 
@@ -62,6 +64,20 @@ async def get_chunk(chunk_id: int) -> Chunk:
     if not result.chunks:
         raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} not found")
     return result.chunks[0]
+
+
+# Plain `def`: these read files, so FastAPI runs them in its thread pool.
+@app.get("/api/evals")
+def list_evals() -> dict:
+    return {"runs": eval_store.list_runs(get_settings().eval_results_dir)}
+
+
+@app.get("/api/evals/{run_id}")
+def get_eval(run_id: str) -> dict:
+    run = eval_store.get_run(get_settings().eval_results_dir, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Eval run {run_id} not found")
+    return run
 
 
 async def _wait_for_disconnect(request: Request) -> None:

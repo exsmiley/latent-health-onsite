@@ -1,6 +1,7 @@
 import { SseParser } from "./sse";
 import { EVENT_TYPES, type ChatEvent, type ChatEventType, type ChatMessage, type Chunk } from "./types";
 import { mockChunk, mockChatStream } from "./mock";
+import type { EvalRun, EvalRunListItem } from "./evalTypes";
 
 export type EventHandler = (event: ChatEvent) => void;
 
@@ -33,7 +34,9 @@ export async function streamChat(
   });
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Request failed: ${res.status} ${res.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`);
+    throw new Error(
+      `Request failed: ${res.status} ${res.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`,
+    );
   }
 
   const parser = new SseParser((msg) => {
@@ -78,4 +81,20 @@ export function fetchChunk(id: number): Promise<Chunk> {
     chunkCache.set(id, p);
   }
   return p;
+}
+
+async function getJson<T>(url: string, what: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Failed to load ${what} (${r.status})`);
+  return (await r.json()) as T;
+}
+
+/** GET /api/evals: every eval run, newest first. */
+export async function fetchEvalRuns(): Promise<EvalRunListItem[]> {
+  return (await getJson<{ runs: EvalRunListItem[] }>("/api/evals", "eval runs")).runs;
+}
+
+/** GET /api/evals/{id}: one run with its summary and per-question records. */
+export function fetchEvalRun(id: string): Promise<EvalRun> {
+  return getJson<EvalRun>(`/api/evals/${encodeURIComponent(id)}`, `eval run ${id}`);
 }
