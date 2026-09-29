@@ -19,9 +19,14 @@ from fakes import (
 
 import rag.db
 from rag.agents import orchestrator
-from rag.agents.evaluator import evaluate
+from rag.agents.evaluator import SCHEMA as EVALUATOR_SCHEMA
+from rag.agents.evaluator import SYSTEM_PROMPT as EVALUATOR_PROMPT
+from rag.agents.evaluator import evaluate, format_question
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
 from rag.agents.research import ANSWER_SCHEMA
+from rag.agents.research import SYSTEM_PROMPT as RESEARCH_PROMPT
+from rag.agents.responder import SYSTEM_PROMPT as RESPONDER_PROMPT
+from rag.agents.responder import build_input as responder_build_input
 from rag.config import get_settings
 from rag.tools import fetch as fetch_tool
 
@@ -237,7 +242,7 @@ async def test_not_found_rejected_before_any_search(fake_env):
         ({"status": "answered", "answer": "", "citations": [101], "reason": ""},
          "non-empty string", [101]),
         ("I think it's 1879.", "not valid JSON", []),
-        ({"status": "maybe"}, '"answered" or "not_found"', []),
+        ({"status": "maybe"}, '"answered", "premise_false" or "not_found"', []),
         ("", "empty", []),
     ],
 )  # fmt: skip
@@ -466,7 +471,7 @@ async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
     assert "round" not in out
 
 
-async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
+async def test_evaluator_gets_original_and_resolved_question_for_follow_ups(fake_env):
     history = [
         {"role": "user", "content": "Who was Albert Einstein?"},
         {"role": "assistant", "content": "A German-born physicist [1]."},
@@ -488,11 +493,73 @@ async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
     )
     evs = await collect("When was he born?", history)
     ev_text = last_input_text(client.calls[1])
-    assert "QUESTION:\nWhen was Albert Einstein born?" in ev_text
-    assert "When was he born?" not in ev_text
+    # Both, clearly labelled: the user's own words first, then the resolved version.
+    assert "QUESTION (the user's latest message, verbatim" in ev_text
+    assert "When was he born?" in ev_text
+    assert "WITH REFERENCES RESOLVED" in ev_text
+    assert "When was Albert Einstein born?" in ev_text
+    assert ev_text.index("When was he born?") < ev_text.index("When was Albert Einstein born?")
+    assert "never drop a constraint or step" in ev_text
     assert "Who was Albert Einstein" not in ev_text  # still no history for the evaluator
     assert only(evs, "outcome")[0]["result"] == "supported"
     assert "question" in ANSWER_SCHEMA["required"]
+
+
+async def test_evaluator_without_history_gets_original_question_not_rewrite(fake_env):
+    original = "Where does the river that flows through the city where Einstein was born end?"
+    client, _ = fake_env(
+        [
+            final(
+                {
+                    # The agent shortened the chain to its last hop; the evaluator must not
+                    # see that.
+                    "question": "Where does the Danube end?",
+                    "status": "answered",
+                    "answer": "The Black Sea.",
+                    "citations": [101],
+                    "reason": "",
+                }
+            ),
+            verdict("supported"),
+            Stream(["The Black Sea [1]."]),
+        ]
+    )
+    await collect(original)
+    ev_text = last_input_text(client.calls[1])
+    assert ev_text.startswith(f"QUESTION:\n{original}\n\n")
+    assert "Where does the Danube end?" not in ev_text
+    assert "RESOLVED" not in ev_text
+
+
+def test_format_question_labels():
+    assert format_question("Q?") == "QUESTION:\nQ?"
+    both = format_question("When was he born?", "When was Einstein born?")
+    assert both.index("verbatim") < both.index("When was he born?")
+    assert both.index("REFERENCES RESOLVED") < both.index("When was Einstein born?")
+
+
+def test_evaluator_prompt_checks_every_link_and_the_asked_hop():
+    p = EVALUATOR_PROMPT
+    assert "requirements" in p
+    assert "every" in p.lower() and "link" in p
+    assert "A final fact backed by" in p and "NOT enough" in p
+    assert "EVERY entity compared" in p
+    assert "stops a hop short" in p
+    assert "never drop a constraint, a step or a compared entity" in p
+    assert "name each missing link" in p
+    assert EVALUATOR_SCHEMA["required"][0] == "requirements"
+
+
+def test_research_prompt_keeps_question_whole_and_cites_every_hop_and_entity():
+    p = RESEARCH_PROMPT
+    assert "never shorten it" in p and "last hop" in p
+    assert "cite a chunk for EVERY hop" in p
+    assert "cite evidence for EVERY entity compared or counted" in p
+    assert "MINIMAL" in p  # still minimal for simple questions
+    q_desc = ANSWER_SCHEMA["properties"]["question"]["description"]
+    assert "Keep every constraint and every step" in q_desc
+    assert "never shorten it" in q_desc
+    assert "every hop" in ANSWER_SCHEMA["properties"]["citations"]["description"]
 
 
 async def test_citation_check_failure_is_retryable_not_fatal(fake_env, monkeypatch):
@@ -539,3 +606,184 @@ async def test_unusable_evaluator_output_counts_as_unsupported(fake_env, raw):
     assert "could not be verified" in evals[0]["feedback"]
     assert only(evs, "error") == []
     assert "could not be verified" in last_input_text(client.calls[2])
+
+
+def premise_false(text: str, citations: list):
+    return final({"status": "premise_false", "answer": text, "citations": citations, "reason": ""})
+
+
+CORRECTION = "Einstein never won a Nobel Prize in Chemistry; he won the 1921 Physics prize."
+
+
+async def test_premise_false_is_evaluated_as_a_correction_and_responded(fake_env):
+    client, _ = fake_env(
+        [
+            search("Einstein Nobel Prize in Chemistry"),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["He won the 1921 Physics prize, not Chemistry [1]."]),
+        ]
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    assert only(evs, "research_answer") == [
+        {
+            "turn": 2,
+            "status": "premise_false",
+            "answer": CORRECTION,
+            "citations": [102],
+            "reason": "",
+        }
+    ]
+    ev_text = last_input_text(client.calls[2])
+    assert "type: PREMISE CORRECTION" in ev_text
+    assert "When did Einstein win the Nobel Prize in Chemistry?" in ev_text
+    assert "PREMISE IS FALSE" in last_input_text(client.calls[3])
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 2}]
+    assert [c["chunk_id"] for c in only(evs, "citations")[0]] == [102]
+    assert reply_text(evs).startswith("He won the 1921")
+
+
+async def test_plain_answer_is_labelled_as_answer_for_evaluator_and_responder(fake_env):
+    client, _ = fake_env([search(), answer("1879", [101]), verdict("supported"), Stream(["ok"])])
+    await collect()
+    assert "type: answer" in last_input_text(client.calls[2])
+    assert "PREMISE CORRECTION" not in last_input_text(client.calls[2])
+    assert "PREMISE IS FALSE" not in last_input_text(client.calls[3])
+
+
+async def test_premise_false_before_any_search_is_rejected(fake_env):
+    fake_env(
+        [
+            premise_false(CORRECTION, [102]),
+            search(),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    answers = only(evs, "research_answer")
+    assert [a["status"] for a in answers] == ["invalid", "premise_false"]
+    assert "needs a search of your own" in answers[0]["reason"]
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+async def test_rejected_premise_correction_feeds_back_and_research_continues(fake_env):
+    client, _ = fake_env(
+        [
+            search(),
+            premise_false("There is no such prize.", [101]),
+            verdict("unsupported", feedback="No passage contradicts the premise."),
+            answer("1879", [101]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    evs = await collect()
+    assert [e["verdict"] for e in only(evs, "evaluation")] == ["unsupported", "supported"]
+    assert "No passage contradicts the premise." in last_input_text(client.calls[3])
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+async def test_ambiguous_answer_covering_two_readings_is_accepted(fake_env):
+    both = "Two readings: Einstein was born in 1879; he won the Nobel Prize in 1921."
+    client, _ = fake_env([search(), answer(both, [101, 102]), verdict("supported"), Stream(["ok"])])
+    evs = await collect("When was Einstein's big year?")
+    assert only(evs, "research_answer")[0]["status"] == "answered"
+    ev_text = last_input_text(client.calls[2])
+    assert "[1] Albert Einstein\n" in ev_text
+    assert "[2] Albert Einstein > Nobel Prize" in ev_text
+    assert both in ev_text
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+def test_prompts_cover_premises_ambiguity_broadening_hops_and_naming():
+    ev = EVALUATOR_PROMPT
+    assert "## Premise corrections" in ev
+    assert "A negative may be concluded from positive facts" in ev
+    assert "the correction addresses what the question asked" in ev
+    assert "## Ambiguous questions" in ev
+    assert "names the alternative" in ev
+    assert 'from the INSIDE OUT, one hop per "of"' in ev
+    assert "NUMBERED HOP" in ev and "the entity at hop N" in ev
+    assert "never merge two hops into one" in ev
+    assert "silently picks one reading" in ev
+    assert 'don\'t demand the literal phrase "named after"' in ev
+    rp = RESEARCH_PROMPT
+    assert "## False premises" in rp
+    assert 'Use "premise_false" ONLY when chunks you have read contradict the premise' in rp
+    assert 'that\'s "not_found"' in rp
+    assert "## Ambiguous questions" in rp
+    assert "Broaden before giving up" in rp and "former holders" in rp
+    assert "CLOSEST TRUE" in rp
+    assert "ALWAYS mention the main alternative" in rp
+    assert ANSWER_SCHEMA["properties"]["status"]["enum"] == [
+        "answered",
+        "premise_false",
+        "not_found",
+    ]
+    assert "Correct it" in responder_build_input("q", "a", None, [], premise_false=True)
+    assert "PREMISE IS FALSE" not in responder_build_input("q", "a", None, [])
+
+
+def test_responder_keeps_every_confirmed_reading():
+
+    assert "Keep EVERY reading, interpretation, item and part" in RESPONDER_PROMPT
+    assert "Never drop one" in RESPONDER_PROMPT
+
+
+def test_prompts_use_no_entities_from_the_eval_sets():
+    """Guard against overfitting: prompt examples stay abstract."""
+
+    names = [
+        "Azerbaijan",
+        "Qajar",
+        "Elizabeth",
+        "Birmingham",
+        "John Paul",
+        "Johnson",
+        "Armstrong",
+        "Canada",
+        "France",
+        "Picasso",
+        "Alexander",
+        "Aristotle",
+        "Plato",
+        "Socrates",
+        "Eiffel",
+        "Einstein",
+        "Curie",
+        "Liszt",
+        "Mozart",
+        "Georgia",
+        "Neckar",
+        "Danube",
+    ]
+    for prompt in (RESEARCH_PROMPT, EVALUATOR_PROMPT, RESPONDER_PROMPT):
+        assert [n for n in names if n in prompt] == []
+
+
+async def test_premise_false_needs_own_search_even_after_pre_retrieval(fake_env):
+    """The starting evidence rarely holds the closest true answer: search for it first."""
+    fake_env(
+        [
+            premise_false(CORRECTION, [102]),
+            search("closest true answer"),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ],
+        pre_retrieve=True,
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    answers = only(evs, "research_answer")
+    assert [a["status"] for a in answers] == ["invalid", "premise_false"]
+    assert "closest true answer" in answers[0]["reason"]
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 3}]
+
+
+async def test_answered_and_not_found_still_allowed_right_after_pre_retrieval(fake_env):
+    fake_env([answer("1879", [101]), verdict("supported"), Stream(["ok"])], pre_retrieve=True)
+    evs = await collect("When was Albert Einstein born?")
+    assert [a["status"] for a in only(evs, "research_answer")] == ["answered"]
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 1}]

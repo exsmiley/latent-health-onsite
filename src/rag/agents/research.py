@@ -5,7 +5,8 @@ A *turn* is one research model call; the orchestrator gives each question a sing
 with any function call is a tool turn: the calls run concurrently and their outputs go back to
 the model (any message text in that response, e.g. a commentary preamble, is ignored). A
 response with no function call is the agent's final answer, a JSON object matching
-`ANSWER_SCHEMA` (set via `text.format`). The orchestrator evaluates "answered" answers and, if
+`ANSWER_SCHEMA` (set via `text.format`). The orchestrator evaluates "answered" and
+"premise_false" answers and, if
 the evaluator rejects one, adds its feedback to the same conversation and keeps going.
 """
 
@@ -13,7 +14,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from rag.agents import events, model, pre_retrieval
 from rag.agents.events import Event
@@ -22,6 +23,8 @@ from rag.tools import registry
 from rag.tools.models import Chunk
 
 SEARCH_TOOLS = {"semantic_search", "keyword_search"}
+STATUSES = ("answered", "premise_false", "not_found")
+AnswerKind = Literal["answered", "premise_false"]
 
 ANSWER_SCHEMA: dict = {
     "type": "object",
@@ -29,25 +32,34 @@ ANSWER_SCHEMA: dict = {
         "question": {
             "type": "string",
             "description": (
-                "The user's latest question rewritten to stand alone: resolve pronouns and "
-                "references to earlier messages. Repeat it unchanged if it already stands alone."
+                "The user's latest question, complete, with only pronouns and references to "
+                "earlier messages resolved. Keep every constraint and every step of the chain; "
+                "never shorten it to a sub-question or to the last hop. Repeat it unchanged if "
+                "it already stands alone."
             ),
         },
         "status": {
             "type": "string",
-            "enum": ["answered", "not_found"],
-            "description": '"answered" if your cited chunks state the answer, else "not_found".',
+            "enum": ["answered", "premise_false", "not_found"],
+            "description": (
+                '"answered" if your cited chunks state the answer; "premise_false" if they '
+                'contradict an assumption the question makes; otherwise "not_found".'
+            ),
         },
         "answer": {
             "type": "string",
-            "description": 'A complete, direct answer to the question ("" for not_found).',
+            "description": (
+                "A complete, direct answer to the question. For premise_false: the correction "
+                'plus the closest true answer the sources give. "" for not_found.'
+            ),
         },
         "citations": {
             "type": "array",
             "items": {"type": "integer"},
             "description": (
                 "The minimal set of chunk ids whose text, read on its own, fully supports every "
-                "claim in the answer ([] for not_found)."
+                "claim in the answer, including every hop of a chain and every entity compared "
+                "([] for not_found)."
             ),
         },
         "reason": {
@@ -101,14 +113,21 @@ preferably in the same turn as other useful calls. Don't give up because of an e
 ## How to answer
 You finish by replying WITHOUT calling any tool. That reply is your final answer and must be \
 a JSON object with exactly these fields:
-- `question`: the user's latest question rewritten to stand alone, e.g. "When did she die?" \
-after a question about Marie Curie becomes "When did Marie Curie die?". The evaluator sees only \
-this question and your cited chunks, never the conversation, so it must be self-contained.
-- `status`: "answered" or "not_found".
-- `answer`: for "answered", a complete, direct answer to the question. "" for "not_found".
-- `citations`: for "answered", the chunk ids that support the answer. [] for "not_found".
+- `question`: the user's latest question with only pronouns and references to earlier \
+messages resolved, e.g. "When did she die?" after a question about person X becomes "When \
+did X die?". Keep EVERY constraint and step of the user's question: never shorten it \
+to a sub-question or to the last hop of a chain, and never replace a described entity with the \
+one you think it is ("the river that flows through the city where X was born" stays as it is). \
+The evaluator checks your answer against the user's own question.
+- `status`: "answered", "premise_false" or "not_found".
+- `answer`: for "answered", a complete, direct answer to the question. For "premise_false", a \
+short correction of the false premise plus the closest true answer the sources give. "" for \
+"not_found".
+- `citations`: for "answered" and "premise_false", the chunk ids that support the answer (for \
+"premise_false": the facts that contradict the premise, and the closest true answer). [] for \
+"not_found".
 - `reason`: for "not_found", one or two sentences on what you searched for and what was \
-missing. "" for "answered".
+missing. "" otherwise.
 You can reply with your answer after any turn, as soon as you're ready. While you still want \
 to research, call tools instead; a reply without tool calls always ends your research.
 
@@ -123,9 +142,9 @@ repeat those searches.
 
 These chunks were picked because they resemble the question, not because they answer it, so \
 check before answering on your first turn:
-- Walk the chain. Write out every step the question needs (e.g. "the teacher of the teacher of \
-Alexander's tutor": tutor → the tutor's teacher → THAT person's teacher) and confirm each step \
-is stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
+- Walk the chain. Write out every step the question needs (e.g. "the mentor of the mentor of \
+X's coach": X's coach → the coach's mentor → THAT person's mentor) and confirm each step is \
+stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
 - Cover every part. For lists and comparisons, make sure you have each item or each side, not \
 just the ones that happened to come up.
 - Take facts about a subject from its own article. If a number or date about X comes from \
@@ -133,8 +152,10 @@ another article (e.g. a mountain's height in a general "Mountain" article), chec
 article and use that, since articles sometimes disagree.
 
 ## How to work
-1. Plan first. Break the question into the facts you need. For multi-part or comparison \
-questions, cover each part.
+1. Plan first. Break the question into the facts you need. For a chain ("the teacher of the \
+man who...") every link is a fact to find in the index, even when you think you know it. For \
+multi-part or comparison questions, cover each part and each entity. Answer exactly what is \
+asked: count the hops and name the entity at the last one.
 2. Search in parallel. In a single turn, call semantic_search and keyword_search together, each \
 with several queries. You can call several tools in the same turn and they run concurrently. \
 Turns are the scarce resource, not tool calls.
@@ -148,28 +169,76 @@ something is missing or the sources conflict.
 keyword, a few phrasings, plus reading the most relevant chunks, e.g. the subject's own \
 article) find nothing that answers the question, reply with status "not_found". Don't keep \
 rephrasing the same search, and never search for guessed answers (e.g. candidate names).
+6. Broaden before giving up. If the exact phrase finds nothing, the fact may be filed under \
+another name: try related article titles, synonyms, and older or historical senses of the \
+term (for a title or office: heirs, governors, rulers, former holders, the ruling family, or \
+the history article of the place). Change the angle; don't just reword the same phrase.
+
+## False premises
+Some questions assume something the sources contradict (e.g. "Who is the king of X?" when X is \
+a republic with a president, or "What did Y say when he landed on Z?" when Y never went to Z). \
+Then reply with status "premise_false". The starting evidence usually shows the premise is \
+wrong, but it rarely holds the rest of the answer, so a premise correction is only accepted \
+after you have run a search yourself: use it for the CLOSEST TRUE ANSWER, i.e. the corrected \
+version of what the user was really asking. For each false detail, find the true one:
+- a false superlative or ranking: the entity that actually holds it ("the smallest is W");
+- a wrong date or a reversed event: what really happened then, and when the event the user \
+named really happened (built in year A, taken down in year B);
+- a title or office that doesn't exist there: the real equivalent office and its holder, AND \
+former or historical holders of that title. Place names are often shared (a country, a \
+historical region, a province of another state), so search the title with the place and \
+with its variants (heir, crown, governor, ruler) and the place's history, and include holders \
+of the title in a same-named region;
+- a wrong place, person or thing: the one the user probably meant, and its answer.
+In `answer`, (1) say briefly what is actually the case, then (2) give the closest true \
+answer(s) the sources have. Cite chunks for both. Correcting the premise alone is only half an \
+answer: if any chunk you have seen names people who held the title (or the event, record or \
+office the user meant) in the past, in a historical state, or in a same-named region or \
+province of another country, include them ("Historically, A and B held that title as rulers \
+of the region of the same name in <state>"), even if that is not the country the user named. Positive facts that rule the \
+premise out ("is a republic", "its head of state is the president") are the evidence; you \
+don't need a chunk saying "there is no king". Use "premise_false" ONLY when chunks you \
+have read contradict the premise, never just because you found nothing. If the fact is simply \
+absent, that's "not_found".
+
+## Ambiguous questions
+If a name or term in the question has several well-known referents (two people with the same \
+name, places with the same name in different countries, successive holders of a name who differ \
+only by a number, a city and a river), ALWAYS mention the main alternative, even when one \
+reading clearly dominates. Either answer the main readings briefly ("X in country A ...; X in \
+country B ..."), or answer the likeliest and add one sentence giving the other reading with \
+its key fact. The starting evidence is ranked by similarity and usually shows only the \
+dominant reading, so don't answer a bare, commonly shared name (a place name, a title plus a \
+first name, a surname shared by famous people) from it alone: search for the other referents \
+first ("<name> <other country>", "<name> I", "<name> II"), and cite a chunk for each reading \
+you mention. Use status "answered".
 
 ## Never guess
 Never answer with anything that the chunks you have read don't state. A made-up or inferred \
 answer will be rejected and wastes the user's time. "not_found" is always better than a guess. \
 Never write "not found" or "the sources don't say" as an "answered" answer; use status \
-"not_found". You can only reply "not_found" after you have searched.
+"not_found". You can only reply "not_found" or "premise_false" after you have searched.
 
 ## Citations (read carefully)
 - Citations MUST be chunk ids. Article ids are rejected.
-- The evaluator sees ONLY the question and the text of the chunks you cite. It does not see \
-your searches, other chunks, whole articles, or your reasoning. If a fact is not in a cited \
-chunk's text, then as far as the evaluator knows it is unsupported.
+- The evaluator sees ONLY the user's question and the text of the chunks you cite. It does \
+not see your searches, other chunks, whole articles, or your reasoning. If a fact is not in a \
+cited chunk's text, then as far as the evaluator knows it is unsupported.
 - Cite the MINIMAL set of chunks that TOGETHER fully support the answer: every claim covered, \
-no padding. Usually 1 to 4 chunks. Drop chunks that add nothing.
+no padding. Usually 1 to 4 chunks for a simple question. Drop chunks that add nothing. Two \
+kinds of question need more, because "fully support" covers every step:
+  - Chains: cite a chunk for EVERY hop. The evaluator checks each link of the chain the question \
+describes, from the first entity to the answer. Knowing an intermediate entity yourself is not \
+evidence; if no cited chunk shows a link, the answer is rejected. E.g. for "On which river is \
+the birthplace of the winner of prize P in year Y?", cite the chunk saying person X won P in \
+Y, the one saying X was born in city C, and the one saying C is on river R.
+  - Comparisons, superlatives ("oldest", "longest", "first"), counts and "which of these" \
+questions: cite evidence for EVERY entity compared or counted, not just the winner. The \
+evaluator can't confirm "the oldest" without every entity's date.
 - The evaluator sees each cited chunk under its "title > section" heading (the same title and \
-section that fetch shows), so a chunk from the article "Albert Einstein" that says "He was \
-born in 1879" is enough to show when Einstein was born. Chunks don't carry any other context \
+section that fetch shows), so a chunk from the article about person X that says "He was \
+born in 1879" is enough to show when X was born. Chunks don't carry any other context \
 from neighbouring chunks.
-- For multi-step questions, cite a chunk for EVERY link in the chain, not just the last fact. \
-E.g. for "On which river is the birthplace of the 1921 physics Nobel winner?", cite the chunk \
-saying Einstein won the 1921 prize, the one saying he was born in Ulm, and the one saying Ulm \
-is on the Danube.
 - Only put in the answer what the cited text supports.
 
 ## Turn budget
@@ -190,10 +259,11 @@ citations."""
 
 @dataclass
 class Submission:
-    question: str  # the standalone question the evaluator checks the answer against
+    question: str  # the agent's standalone rewrite (references resolved); see `evaluate`
     answer: str
     citations: list[int]
     chunks: list[Chunk]  # same order as `citations`
+    status: AnswerKind = "answered"  # "premise_false": the answer corrects the premise
 
 
 @dataclass
@@ -211,14 +281,17 @@ class ResearchAgent:
     submission: Submission | None = None
     not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
+    own_search: bool = False  # the model itself has called a search tool (not pre-retrieval)
     shown: set[int] = field(default_factory=set)  # chunk ids whose full text the model has seen
     turns_used: int = 0
+    has_history: bool = False  # earlier user/assistant messages precede the question
 
     def __post_init__(self) -> None:
         for msg in self.history:
             role, content = msg.get("role"), msg.get("content")
             if role in ("user", "assistant") and isinstance(content, str) and content:
                 self.items.append({"role": role, "content": content})
+        self.has_history = bool(self.items)
         self.items.append({"role": "user", "content": self.question})
 
     async def pre_retrieve(self, max_turns: int) -> AsyncIterator[Event]:
@@ -298,7 +371,8 @@ class ResearchAgent:
     async def run_turn(self, turn: int, max_turns: int) -> AsyncIterator[Event]:
         """Run one research turn, yielding status/tool_call/tool_result/research_answer events.
 
-        Afterwards `self.submission` holds an accepted "answered" reply, `self.not_found` the
+        Afterwards `self.submission` holds an accepted "answered" or "premise_false" reply
+        (see `Submission.status`), `self.not_found` the
         reason of an accepted "not_found" reply, or both are None (a tool turn, or an invalid
         answer that was fed back to the model).
         """
@@ -343,12 +417,19 @@ class ResearchAgent:
                 'You replied "not_found" without searching. Search the index '
                 "(semantic_search and keyword_search) first."
             )
+        elif error is None and data["status"] == "premise_false" and not self.own_search:
+            error = (
+                'A "premise_false" answer needs a search of your own first (the starting '
+                "evidence doesn't count). Search for the closest true answer: what the user "
+                "was really asking, with the false detail corrected (the real holder, date, "
+                "event or office, and former holders of the title), then reply again."
+            )
         elif error is None:
             submission, error = await validate_submission(data, fallback_question=self.question)
             if submission is not None:
                 self.submission = submission
                 yield events.research_answer(
-                    turn, "answered", submission.answer, submission.citations, ""
+                    turn, submission.status, submission.answer, submission.citations, ""
                 )
                 return
 
@@ -420,6 +501,7 @@ class ResearchAgent:
             return _CallOutcome(_error_json(f"Unknown tool {call.name!r}."), "error: unknown tool")
         if call.name in SEARCH_TOOLS:
             self.searched = True
+            self.own_search = True
         try:
             result = await registry.dispatch(call.name, args)
         except Exception as exc:  # noqa: BLE001 - the model gets the error and can adapt
@@ -456,15 +538,19 @@ def _parse_answer(raw: str) -> tuple[dict | None, str | None]:
             "Your reply was not valid JSON. A reply without tool calls must be the JSON answer "
             "object with status, answer, citations and reason."
         )
-    if not isinstance(data, dict) or data.get("status") not in ("answered", "not_found"):
-        return None, 'The answer must be a JSON object whose status is "answered" or "not_found".'
+    if not isinstance(data, dict) or data.get("status") not in STATUSES:
+        return None, (
+            'The answer must be a JSON object whose status is "answered", "premise_false" or '
+            '"not_found".'
+        )
     return data, None
 
 
 async def validate_submission(
     args: dict, fallback_question: str
 ) -> tuple[Submission | None, str | None]:
-    """Check an "answered" reply. Returns (submission, None) or (None, error message).
+    """Check an "answered" or "premise_false" reply. Returns (submission, None) or (None,
+    error message).
 
     `fallback_question` is used when the reply has no standalone `question`.
     """
@@ -505,6 +591,7 @@ async def validate_submission(
             answer=answer.strip(),
             citations=ids,
             chunks=[by_id[i] for i in ids],
+            status="premise_false" if args.get("status") == "premise_false" else "answered",
         ),
         None,
     )
@@ -525,8 +612,8 @@ def retry_feedback(evaluator_feedback: str, independent_answer: str, turns_left:
         )
     parts.append(
         f"{_turns_left(turns_left)} Find the missing evidence (or narrow the answer to what the "
-        "sources support), then reply again with the minimal set of chunk ids that fully "
-        'supports it, or reply "not_found" if the index doesn\'t have it.'
+        "sources support), then reply again with the chunk ids that fully support it (every hop "
+        'of a chain, every entity compared), or reply "not_found" if the index doesn\'t have it.'
     )
     return "\n\n".join(parts)
 

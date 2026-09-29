@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANSWER_LABEL,
   continuation,
   finish,
   formatArgs,
   formatDuration,
   initialAssistantState,
+  isEvaluated,
   reduce,
   stageTimes,
   summaryLine,
@@ -206,5 +208,35 @@ describe("formatArgs", () => {
   it("renders queries, ids and top_k compactly", () => {
     expect(formatArgs({ queries: ["a", "b"], top_k: 5 })).toBe('"a", "b" · top_k: 5');
     expect(formatArgs({ chunk_ids: [1, 2] })).toBe("chunk_ids: [1, 2]");
+  });
+});
+
+describe("premise_false answers", () => {
+  const premise = (turn: number): ChatEvent => ({
+    type: "research_answer",
+    data: { turn, status: "premise_false", answer: "It is a republic.", citations: [7], reason: "" },
+  });
+
+  it("is labelled as a premise correction and evaluated like an answer", () => {
+    expect(ANSWER_LABEL.premise_false).toBe("Premise corrected");
+    const s = run([
+      status("research", 1),
+      premise(1),
+      status("evaluate", 1),
+      evaluation(1, "supported"),
+      status("respond", null),
+      { type: "outcome", data: { result: "supported", turns_used: 1 } },
+    ]);
+    const t = s.turns[0];
+    expect(t.answer?.status).toBe("premise_false");
+    expect(isEvaluated(t.answer)).toBe(true);
+    expect(continuation(t, MAX)).toBeNull();
+    expect(s.outcome?.result).toBe("supported");
+  });
+
+  it("does not treat not_found or invalid as evaluated", () => {
+    expect(isEvaluated({ turn: 1, status: "not_found", answer: "", citations: [], reason: "x" })).toBe(false);
+    expect(isEvaluated({ turn: 1, status: "invalid", answer: "", citations: [], reason: "x" })).toBe(false);
+    expect(isEvaluated(null)).toBe(false);
   });
 });

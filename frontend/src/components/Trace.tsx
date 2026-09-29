@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ANSWER_LABEL,
   continuation,
   formatArgs,
   formatDuration,
+  isEvaluated,
   OUTCOME_LABEL,
   spanMs,
   stageTimes,
@@ -173,7 +175,7 @@ function TurnView({
   const live = running && isLast;
   const thinking = live && status?.stage === "research" && t.calls.length === 0 && !t.answer;
   const evaluating =
-    running && status?.stage === "evaluate" && status.turn === t.turn && t.answer?.status === "answered" && !t.evaluation;
+    running && status?.stage === "evaluate" && status.turn === t.turn && isEvaluated(t.answer) && !t.evaluation;
   const next = continuation(t, maxTurns);
   const tone = t.evaluation?.verdict ?? (t.answer?.status === "invalid" ? "unsupported" : "");
 
@@ -248,10 +250,11 @@ function TurnView({
 }
 
 function AnswerView({ a }: { a: ResearchAnswerData }) {
-  if (a.status === "answered") {
+  if (isEvaluated(a)) {
+    const premise = a.status === "premise_false";
     return (
-      <div className="proposed">
-        <div className="step-label">Answer</div>
+      <div className={`proposed${premise ? " premise-false" : ""}`}>
+        <div className="step-label">{ANSWER_LABEL[a.status]}</div>
         <p>{a.answer}</p>
         <div className="muted small">cites chunks {a.citations.join(", ") || "none"}</div>
       </div>
@@ -260,14 +263,14 @@ function AnswerView({ a }: { a: ResearchAnswerData }) {
   if (a.status === "not_found") {
     return (
       <div className="proposed not-found">
-        <div className="step-label">Not found</div>
+        <div className="step-label">{ANSWER_LABEL.not_found}</div>
         {a.reason && <p>{a.reason}</p>}
       </div>
     );
   }
   return (
     <div className="proposed invalid">
-      <div className="step-label">Invalid answer</div>
+      <div className="step-label">{ANSWER_LABEL.invalid}</div>
       <p className="error-text">{a.reason || "The answer was rejected."}</p>
     </div>
   );
