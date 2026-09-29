@@ -121,6 +121,17 @@ Otherwise use them to plan: the fetched chunks often settle the first step of a 
 question, so search for the next step, and fetch other promising hits, right away. Don't \
 repeat those searches.
 
+These chunks were picked because they resemble the question, not because they answer it, so \
+check before answering on your first turn:
+- Walk the chain. Write out every step the question needs (e.g. "the teacher of the teacher of \
+Alexander's tutor": tutor → the tutor's teacher → THAT person's teacher) and confirm each step \
+is stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
+- Cover every part. For lists and comparisons, make sure you have each item or each side, not \
+just the ones that happened to come up.
+- Take facts about a subject from its own article. If a number or date about X comes from \
+another article (e.g. a mountain's height in a general "Mountain" article), check X's own \
+article and use that, since articles sometimes disagree.
+
 ## How to work
 1. Plan first. Break the question into the facts you need. For multi-part or comparison \
 questions, cover each part.

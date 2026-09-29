@@ -111,7 +111,10 @@ out of turns ──► fixed "couldn't find" reply
   outputs, and the fetched chunk ids sit next to the hits they came from. They emit
   `status`/`tool_call`/`tool_result` events with turn 0, don't count toward `turns_used`, and
   count as a search for the "not_found" rule if either search succeeded. The system prompt
-  tells the model to read them first and answer on turn 1 when they suffice.
+  tells the model to read them first and answer on turn 1 when they suffice, but only after
+  checking that every step of the question's chain and every item or side is stated in a chunk
+  it has read, and that facts about a subject come from the subject's own article (pre-retrieved
+  chunks resemble the question; they don't necessarily answer it).
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
   Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
