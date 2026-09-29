@@ -79,6 +79,9 @@ are no rounds. A *turn* is one research-agent model call. Evaluator and responde
 count as turns.
 
 ```
+turn 0 (pre-retrieval, no model call, not a turn):
+    semantic_search(question) + keyword_search(its names/numbers) ──► fetch the top hits
+    └─ added to the conversation as function_call/function_call_output pairs
 for turn in 1..7:
     research agent model call (tools: semantic_search, keyword_search, fetch; tool_choice auto)
     ├─ made tool calls ──► run them concurrently, feed results back, next turn
@@ -91,6 +94,22 @@ for turn in 1..7:
 out of turns ──► fixed "couldn't find" reply
 ```
 
+- **Pre-retrieval** (`rag.agents.pre_retrieval`, `ResearchAgent.pre_retrieve`; on unless
+  `settings.research_pre_retrieve` is false). Before turn 1 the harness itself, with no model
+  call, runs `semantic_search` (top 8) on the question and `keyword_search` (top 5) on a query
+  made of the question's capitalized names (consecutive ones as a quoted phrase) and numbers,
+  at most 4 terms (skipped if there are none; a whole question ANDs every word and rarely
+  matches). It then fetches the top 5 semantic and top 2 keyword hits in full, dropping chunks
+  over 4,000 characters (big lists), so the model can cite without a turn of reading. For a
+  question with history, the semantic query is the previous user and assistant messages
+  (400 chars each, `[n]` markers removed) followed by the question, and the keyword query
+  falls back to that text when the question itself has no names. The calls go into the
+  conversation after the question as ordinary `function_call`/`function_call_output` pairs,
+  exactly as if the model had made them: the model already knows how to read and cite tool
+  outputs, and the fetched chunk ids sit next to the hits they came from. They emit
+  `status`/`tool_call`/`tool_result` events with turn 0, don't count toward `turns_used`, and
+  count as a search for the "not_found" rule if either search succeeded. The system prompt
+  tells the model to read them first and answer on turn 1 when they suffice.
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
   Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
@@ -142,8 +161,8 @@ out of turns ──► fixed "couldn't find" reply
 
 | type | data |
 |---|---|
-| `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting; evaluate: the turn whose answer is checked; respond: null) |
-| `tool_call` | `{id: str, name: str, arguments: object, turn: int}` |
+| `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting, 0 for pre-retrieval; evaluate: the turn whose answer is checked; respond: null) |
+| `tool_call` | `{id: str, name: str, arguments: object, turn: int}` (turn 0: pre-retrieval, run by the harness before turn 1) |
 | `tool_result` | `{id: str, name: str, summary: str}` (e.g. "3 queries, 15 hits") |
 | `research_answer` | `{turn: int, status: "answered"\|"not_found"\|"invalid", answer: str, citations: int[], reason: str}` (every final message from the agent; "invalid" carries the error in `reason` and research continues) |
 | `evaluation` | `{turn: int, verdict: "supported"\|"unsupported", independent_answer: str, feedback: str}` |

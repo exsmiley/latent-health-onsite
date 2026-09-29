@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     # Agents
     research_max_turns: int = 7  # total research-agent model calls per question
+    research_pre_retrieve: bool = True  # search + fetch the question before turn 1 (turn 0)
     search_top_k: int = 5
     blurb_words: int = 40
     hit_full_text: int = 3  # new hits per query shown with full text (the rest get blurbs)
