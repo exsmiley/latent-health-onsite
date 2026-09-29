@@ -14,6 +14,8 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
+import rag.agents.model
+from rag.tools import fetch, registry
 from rag.tools.models import Chunk, FetchResult
 
 # ---- scripted model outputs -------------------------------------------------------------------
@@ -214,9 +216,6 @@ def install(
     monkeypatch, script: list[Any], tools: ToolRecorder | None = None
 ) -> tuple[FakeClient, ToolRecorder]:
     """Swap in the fake model client and fake tools (patched on the real tool modules)."""
-    import rag.agents.model
-    from rag.tools import fetch, registry
-
     client = FakeClient(script)
     tools = tools or ToolRecorder()
     monkeypatch.setattr(rag.agents.model, "get_client", lambda: client)

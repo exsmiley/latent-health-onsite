@@ -43,3 +43,6 @@ markers = ["db: requires a running Postgres (docker compose up -d db)"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["PLC0415"]  # imports belong at module top
