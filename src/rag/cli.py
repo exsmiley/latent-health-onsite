@@ -47,7 +47,9 @@ def ask(question: str) -> None:
 
 @app.command("eval")
 def eval_(
-    set_name: str = typer.Option("main", "--set", help="Question set: main, super_hard or all"),
+    set_name: str = typer.Option(
+        "main", "--set", help="Question set: main, super_hard, premise or all"
+    ),
     file: str | None = typer.Option(None, help="Question JSONL file (overrides --set)"),
     ids: str | None = typer.Option(None, help="Comma-separated question ids, e.g. q001,q002"),
     limit: int | None = typer.Option(None, help="Only the first N selected questions"),

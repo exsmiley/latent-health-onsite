@@ -3,13 +3,17 @@
 Usage:
     uv run python evals/validate.py [path.jsonl ...]
 
-With no arguments, validates evals/questions.jsonl and evals/questions_super_hard.jsonl.
+With no arguments, validates evals/questions.jsonl, evals/questions_super_hard.jsonl and
+evals/questions_premise.jsonl.
 
 Checks, for every line:
   * it parses as JSON and has the required fields with the right types/values;
   * the `id` is unique (across all files validated together);
   * super-hard questions (`tier: "super_hard"`) have the extra fields, with
     1 <= sequential_depth <= hops and breadth == number of distinct supporting article_ids;
+  * premise questions (`tier: "premise"`) have a premise `type`, the matching
+    `expected_behavior` and a non-empty `premise`; only `unanswerable` questions may have empty
+    `supporting_chunks`;
   * every supporting chunk exists, with the recorded article_id, chunk_index and title
     (section is checked too and reported as a warning on mismatch);
   * every `evidence` string appears in that chunk's text after whitespace normalization.
@@ -29,11 +33,21 @@ from pathlib import Path
 from rag import db
 
 EVALS_DIR = Path(__file__).resolve().parent
-DEFAULT_PATHS = [EVALS_DIR / "questions.jsonl", EVALS_DIR / "questions_super_hard.jsonl"]
+DEFAULT_PATHS = [
+    EVALS_DIR / "questions.jsonl",
+    EVALS_DIR / "questions_super_hard.jsonl",
+    EVALS_DIR / "questions_premise.jsonl",
+]
 
 TYPES = {"multi_article", "multi_chunk", "comparison", "aggregation", "temporal", "single_hop"}
 DIFFICULTIES = {"easy", "medium", "hard"}
 SUPER_TYPES = {"deep_chain", "wide", "deep_wide"}
+# premise tier: type -> the expected_behavior it must carry
+PREMISE_BEHAVIORS = {
+    "false_premise": "correct_premise",
+    "ambiguous": "disambiguate",
+    "unanswerable": "not_found",
+}
 SUPER_REQUIRED = {"tier": str, "sequential_depth": int, "breadth": int, "min_turns_estimate": int}
 REQUIRED = {
     "id": str,
@@ -70,6 +84,27 @@ def is_super(q: dict) -> bool:
     return q.get("tier") == "super_hard"
 
 
+def is_premise(q: dict) -> bool:
+    return q.get("tier") == "premise"
+
+
+def check_premise(q: dict, where: str, errors: list[str]) -> None:
+    t = q.get("type")
+    if t not in PREMISE_BEHAVIORS:
+        errors.append(f"{where}: bad premise type {t!r}")
+    elif q.get("expected_behavior") != PREMISE_BEHAVIORS[t]:
+        errors.append(
+            f"{where}: type {t!r} needs expected_behavior {PREMISE_BEHAVIORS[t]!r}, "
+            f"got {q.get('expected_behavior')!r}"
+        )
+    if not isinstance(q.get("premise"), str) or not q["premise"].strip():
+        errors.append(f"{where}: premise field missing or empty")
+    if q.get("difficulty") not in DIFFICULTIES:
+        errors.append(f"{where}: bad difficulty {q.get('difficulty')!r}")
+    if not str(q.get("notes", "")).strip():
+        errors.append(f"{where}: premise questions need notes (what good vs bad looks like)")
+
+
 def check_shape(q: dict, where: str, errors: list[str]) -> None:
     for key, typ in REQUIRED.items():
         if key not in q:
@@ -96,6 +131,8 @@ def check_shape(q: dict, where: str, errors: list[str]) -> None:
                 errors.append(
                     f"{where}: breadth {q['breadth']} != {len(arts)} distinct supporting articles"
                 )
+    elif is_premise(q):
+        check_premise(q, where, errors)
     else:
         if "tier" in q:
             errors.append(f"{where}: unknown tier {q.get('tier')!r}")
@@ -111,7 +148,7 @@ def check_shape(q: dict, where: str, errors: list[str]) -> None:
         errors.append(f"{where}: answer_aliases must be strings")
     sc = q.get("supporting_chunks")
     if isinstance(sc, list):
-        if not sc:
+        if not sc and not (is_premise(q) and q.get("type") == "unanswerable"):
             errors.append(f"{where}: no supporting_chunks")
         for j, c in enumerate(sc):
             if not isinstance(c, dict):
@@ -172,7 +209,8 @@ def summarize(path: Path, questions: list[dict]) -> None:
         f"({len(distinct)} distinct), {sum(n_articles(q) > 1 for q in questions)} span 2+ articles"
     )
     total = max(len(questions), 1)
-    main_qs = [q for q in questions if not is_super(q)]
+    main_qs = [q for q in questions if not is_super(q) and not is_premise(q)]
+    premise_qs = [q for q in questions if is_premise(q)]
     super_qs = [q for q in questions if is_super(q)]
     if main_qs:
         by_type = Counter(q.get("type") for q in main_qs)
@@ -205,6 +243,13 @@ def summarize(path: Path, questions: list[dict]) -> None:
                 print(f"  {t:<10} depth {depth[0]}-{depth[-1]}, breadth {br[0]}-{br[-1]}")
         over = sum(q.get("min_turns_estimate", 0) > 7 for q in super_qs)
         print(f"  min_turns_estimate > 7 (production budget): {over}/{len(super_qs)}")
+    if premise_qs:
+        print("Premise tier, by type (expected_behavior):")
+        by_type = Counter(q.get("type") for q in premise_qs)
+        for t, b in PREMISE_BEHAVIORS.items():
+            print(f"  {t:<14} {by_type[t]:>3}  ({b})")
+        print("  difficulty: " + dist(q.get("difficulty") for q in premise_qs))
+        print("  hops:       " + dist(q.get("hops") for q in premise_qs))
 
 
 async def main(paths: list[Path]) -> int:
