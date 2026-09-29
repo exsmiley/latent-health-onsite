@@ -1,5 +1,14 @@
 # Evaluation question set
 
+There are two files:
+
+| file | questions | purpose |
+|---|---:|---|
+| `questions.jsonl` | 81 | Main set: hard, mostly 2–3 hop questions that should be solvable within the production 7-turn budget |
+| `questions_super_hard.jsonl` | 29 | [Super-hard tier](#super-hard-tier): 6–8 step chains and 10–14 article fan-outs, built to find the breaking point |
+
+The rest of this section and the next few describe the main set.
+
 `questions.jsonl` holds 81 hard questions, each answerable from this corpus: the
 `20220301.simple` Simple English Wikipedia snapshot as chunked into the `chunks` table. Most of
 them need several retrieval steps. The set is weighted toward questions whose evidence spans
@@ -95,18 +104,167 @@ the dominant reasoning operation.
 ## Validation
 
 ```
-uv run python evals/validate.py [path]     # defaults to evals/questions.jsonl
+uv run python evals/validate.py [path ...]   # defaults to both questions.jsonl and questions_super_hard.jsonl
 ```
 
 The script checks that:
-- every line parses and has the required fields, types and enum values;
-- ids and question texts are unique;
+- every line parses and has the required fields, types and enum values for its tier;
+- ids and question texts are unique across all the files checked together;
+- super-hard questions have `tier`, `sequential_depth`, `breadth` and `min_turns_estimate`, with
+  `1 <= sequential_depth <= hops`, `min_turns_estimate >= sequential_depth`, and `breadth` equal
+  to the number of distinct `article_id`s in `supporting_chunks`;
 - every supporting chunk exists with the recorded `article_id`, `chunk_index` and `title` (a
   `section` mismatch is only a warning);
 - each `evidence` string appears in that chunk's text after whitespace normalization.
 
-It prints counts by type, difficulty and hops, and exits non-zero on any error. It only runs
-SELECTs. It currently passes with 0 errors and 0 warnings.
+For each file it prints counts by type, difficulty and hops. For the super-hard tier it prints
+counts by type and the distributions of hops, depth, breadth and `min_turns_estimate`. It exits
+non-zero on any error and only runs SELECTs. Both files currently pass with 0 errors and 0
+warnings.
+
+## Super-hard tier
+
+`questions_super_hard.jsonl` (ids `sh001`–`sh029`) is a stress test. **Its purpose is to find
+the breaking point, not to measure day-to-day quality.** With the production budget of 7 research
+turns, many deep chains (depth above about 6) are *expected* to run out of turns even when every
+step is found. Low scores on this tier at budget 7 are therefore not a regression. That is why it
+should also be run with an extended budget (see [Benchmarking
+requirements](#benchmarking-requirements)).
+
+It was built the same way as the main set: questions were written from chunk text read in the DB,
+with evidence recorded for every hop, metadata filled in from the DB, and each hop's key chunk
+checked for findability. Because a single fuzzy link ruins a long chain, the rules were stricter:
+- every link must be stated explicitly in chunk text;
+- no link may come only from a category line or rest on an inferred fact;
+- a candidate is dropped when articles contradict each other on the fact it needs.
+
+Several candidates were dropped for these reasons, e.g. a Norway "independent in the 20th
+century" question (its lead says "independent since 1814"), noble-gas discoverers (Ramsay's
+article contradicts Helium/Radon), and stadium capacities. No chain from the main set is reused.
+
+### Extra fields
+
+| field | meaning |
+|---|---|
+| `tier` | Always `"super_hard"` |
+| `difficulty` | Always `"super_hard"` |
+| `type` | `deep_chain`, `wide` or `deep_wide` (see below) |
+| `hops` | Total number of lookups |
+| `sequential_depth` | Longest chain of dependent lookups: the minimum number of research turns even with unlimited parallel tool calls |
+| `breadth` | Number of distinct articles in `supporting_chunks` (checked by the validator) |
+| `min_turns_estimate` | Estimated turns for an efficient agent, including fetches and the final-answer turn (formula below) |
+
+`min_turns_estimate = sequential_depth + min(sequential_depth, F) + 1`. Here F is the number of
+supporting articles whose evidence is *not* inside the 40-word search blurb, which is roughly the
+number of fetch rounds needed. The formula assumes parallel searches and fetches within a turn,
+plus one fetch turn per dependent step where the blurb does not already show the fact. It is a
+consistent, mechanical estimate, not a bound. A lucky agent that recognizes intermediate entities
+from its own knowledge can beat it; an agent that searches badly will exceed it.
+
+### Types
+
+- **deep_chain** (10): sequential chains of 6–8 dependent steps, where each answer is the next
+  search key. Example (sh007): *Tristan und Isolde premiere conductor → his father-in-law Liszt →
+  Liszt's teacher Czerny → Czerny's teacher Beethoven → Beethoven's teacher Haydn → Haydn's
+  employer Porpora → Porpora's first opera → Nero.*
+- **wide** (11): 10–14 independent lookups (one per article), then combined by ranking, counting,
+  finding the earliest or latest, or matching equal years. Depth is 1–2, so an agent that runs
+  searches in parallel should manage in 2–5 turns. Serial agents will not.
+- **deep_wide** (8): a 3–5 step chain whose end is a set of 5 or more entities, then an
+  aggregation over them. Example: *Bath museum → Herschel → Uranus → its five biggest moons → who
+  discovered each, and when.*
+
+### Breakdown
+
+| type | n | hops | sequential_depth | breadth | min_turns_estimate |
+|---|---:|---|---|---|---|
+| deep_chain | 10 | 6–8 | 6–8 | 5–8 | 9–17 |
+| wide | 11 | 10–14 | 1–2 | 10–14 | 2–5 |
+| deep_wide | 8 | 7–9 | 3–5 | 6–9 | 5–9 |
+
+- **Distributions over all 29 questions:**
+  - depth: 1: 8, 2: 3, 3: 5, 4: 2, 5: 1, 6: 7, 7: 2, 8: 1
+  - breadth: 5: 1, 6: 6, 7: 6, 8: 4, 9: 1, 10: 4, 12: 5, 13: 1, 14: 1
+- **Over the production budget:** 11 of 29 questions have `min_turns_estimate` above 7. All 10
+  deep chains are among them.
+- **Domain split:** science/technology 10, history/politics/geography 9, arts/music/business 10.
+
+### Super-hard caveats
+
+- **Mergeable hops:** some chains have a chunk that states two links at once, so an agent can
+  merge hops. The recorded `sequential_depth` accounts for this: sh002 and sh003 are 7 hops but
+  depth 6. sh008's Perugia chunk says "near the Tiber", which allows a depth-5 shortcut; the notes
+  flag this.
+- **Keyword search only:** a few key chunks are reliably found by `keyword_search` but not by
+  `semantic_search`, e.g. the Korolev/Kerimov clue (sh001), "Le Réveillon" (sh009), Czerny →
+  Beethoven (sh007), the 1913 Ballets Russes description (sh027) and "Le Cateau-Cambrésis"
+  (sh028).
+- **Pinned to corpus wording:**
+  - sh023: the six noble gases as listed in the Noble gas article; oganesson is excluded.
+  - sh029: Tailleferre's birthplace is Saint-Maur-des-Fossés, so she does not count as Paris-born.
+  - sh004: the Franz Joseph article wrongly calls Franz Ferdinand his "brother"; the question only
+    uses "successor".
+  - sh025: Nur-Sultan/Astana, with a move date of 1997 vs 1998; the question asks only for "late
+    1990s".
+- **Snapshot age:** sh014 describes Ken Mattingly as living (he died in 2023). The answer is
+  unaffected.
+- **Wide questions list their entities:** they name their entity set explicitly or define it
+  closed, e.g. "presidents numbered 29th–38th". Answers depend on the exact dates in each
+  article, and several include deliberate near-ties (Watt and Coulomb both born in 1736;
+  Lawrence and Fermi both born in 1901; Nixon and Ford both born in 1913).
+- **Guessable intermediates:** a strong model may guess intermediate entities (Marx, Lenin,
+  Stalin) without searching. Every hop still needs a retrieved chunk as evidence for a supported
+  answer.
+
+## Benchmarking requirements
+
+These are the requirements the eval runner was built against (see [Running the
+evals](#running-the-evals) for what it records). It should drive
+`rag.agents.orchestrator.run()`, or `POST /api/chat`, once per question with empty history, and
+record the following for each question and run.
+
+**Per question:**
+- **Total wall-clock time.** This is the headline metric: time from submitting the question to
+  the `done` (or `error`) event, including research, evaluation and responding.
+- **Turns used:** `outcome.turns_used`, and the budget it ran under.
+- **Outcome:** `supported`, `not_found`, `out_of_turns` or `error` (an exception or SSE `error`
+  event).
+- **Correctness.** Normalize the final answer and the research `answer` (case, punctuation,
+  articles, number formatting), then match them against `answer` and `answer_aliases`. If there is
+  no match, fall back to an LLM judge that sees the question, the expected answer and aliases,
+  `notes`, and the system's answer, and returns correct, partially correct or incorrect. Record
+  which method decided. Multi-part answers ("first X, last Y, count Z") need the judge to score
+  each part.
+- **Citation overlap.** Match the cited chunks to `supporting_chunks` on `(article_id,
+  chunk_index)`, never on `chunk_id`, which changes on re-ingest. Report chunk-level recall and
+  precision, plus article-level recall. `supporting_chunks` is *one sufficient set*, not the only
+  one: the notes often name alternatives. So low overlap on a correct, supported answer is
+  informational, not a failure. Correctness is the primary metric.
+- **Time per turn:** the model-call latency and the tool-execution latency for each research turn.
+- **Evaluator and responder time:** each evaluator call and the responder stream, including
+  time to first token.
+- **Token usage:** input, output and cached tokens per call (research, evaluator, responder),
+  plus embedding tokens for `semantic_search`.
+- **Trace data:** tool calls per turn, the number of evaluator rejections, and the verdicts from
+  the `evaluation` events, kept for failure analysis.
+
+**Reporting:**
+- Break results down by tier (main vs super-hard), by type, and by difficulty (main set) or
+  depth/breadth bucket (super-hard).
+- For each group report accuracy, the outcome mix, and median and p90 wall-clock time. Also report
+  median/p90 turns and tokens, and cost per question.
+- For the super-hard tier, show accuracy and out-of-turns rate against `sequential_depth` and
+  `min_turns_estimate`. That is the breaking-point curve.
+
+**Budgets:** run the super-hard tier twice, at the production budget
+(`research_max_turns = 7`) and at an extended budget (e.g. 15). This separates two failures:
+- *Ran out of budget:* out-of-turns at 7 but correct at 15.
+- *Reasoning or retrieval failed:* wrong, not found or out of turns even at 15.
+
+The main set runs at the production budget. Run each configuration more than once, or at least
+keep the seeds and model versions, because agent runs are not deterministic. Run questions with
+bounded concurrency so wall-clock times aren't inflated by rate limits, and record the
+concurrency level.
 
 ## Running the evals
 
@@ -198,7 +356,7 @@ implies 0.02 for `text-embedding-3-small`).
 outcome changes overall, per tier and per type, then the questions that were fixed (wrong in A,
 correct in B) or broken, and the largest per-question time changes.
 
-## Caveats
+## Caveats (main set)
 
 **Snapshot versus reality.** The expected answer follows the corpus in each of these cases:
 - **q003:** the Linus Pauling article says his 1954 Chemistry Nobel was for DNA structure (it was
