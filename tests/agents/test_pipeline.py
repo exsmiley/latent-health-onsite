@@ -429,6 +429,18 @@ async def test_evaluator_parses_structured_output(fake_env):
     assert result.verdict == "unsupported" and result.feedback == "Missing Nobel."
 
 
+async def test_evaluator_sees_self_identifying_chunks(fake_env):
+    client, _ = fake_env([verdict("supported")])
+    await evaluate("When did Einstein win the Nobel Prize?", "1921", [CHUNKS[102], CHUNKS[101]])
+    call = client.calls[0]
+    text = last_input_text(call)
+    # Every passage is headed "title > section" (just the title for a lead chunk), like embed_text.
+    assert "[1] Albert Einstein > Nobel Prize\nEinstein won the Nobel Prize" in text
+    assert "[2] Albert Einstein\nAlbert Einstein was a German-born physicist." in text
+    # The prompt lets headings resolve identity only, never other facts.
+    assert "only to resolve who or what a passage is about" in call["instructions"]
+
+
 async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
     async def noop():
         return None

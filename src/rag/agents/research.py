@@ -151,9 +151,14 @@ your searches, other chunks, whole articles, or your reasoning. If a fact is not
 chunk's text, then as far as the evaluator knows it is unsupported.
 - Cite the MINIMAL set of chunks that TOGETHER fully support the answer: every claim covered, \
 no padding. Usually 1 to 4 chunks. Drop chunks that add nothing.
-- Chunks don't carry context from neighbouring chunks. If a chunk says "He was born in 1879" \
-without naming the person, also cite a chunk that establishes who "he" is, or pick a better \
-chunk.
+- The evaluator sees each cited chunk under its "title > section" heading (the same title and \
+section that fetch shows), so a chunk from the article "Albert Einstein" that says "He was \
+born in 1879" is enough to show when Einstein was born. Chunks don't carry any other context \
+from neighbouring chunks.
+- For multi-step questions, cite a chunk for EVERY link in the chain, not just the last fact. \
+E.g. for "On which river is the birthplace of the 1921 physics Nobel winner?", cite the chunk \
+saying Einstein won the 1921 prize, the one saying he was born in Ulm, and the one saying Ulm \
+is on the Danube.
 - Only put in the answer what the cited text supports.
 
 ## Turn budget

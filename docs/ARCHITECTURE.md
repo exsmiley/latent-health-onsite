@@ -128,7 +128,8 @@ out of turns ──► fixed "couldn't find" reply
   - it should prefer fetching specific chunks over whole articles;
   - **citations must be chunk ids**, and the evaluator sees only the cited chunk text and will
     not accept whole articles;
-  - it should cite the minimal sufficient set of chunks;
+  - it should cite the minimal sufficient set of chunks, including one for every link of a
+    multi-step chain (each chunk is shown to the evaluator under its title/section heading);
   - it should never guess, and should answer "not_found" after about two turns of fruitless
     focused searching;
   - it should answer as early as the evidence allows.
@@ -141,7 +142,10 @@ out of turns ──► fixed "couldn't find" reply
 - **Evaluator** (`rag.agents.evaluator`). A single model call, with structured JSON output
   `{independent_answer: str, verdict: "supported" | "unsupported", feedback: str}`. It answers
   the (standalone) question from the cited chunk texts alone, then judges whether that answer agrees with the
-  research agent's answer. The feedback says what's missing or contradicted. An empty or malformed
+  research agent's answer. Each cited chunk is shown as `[n] {title} > {section}` (or `[n] {title}`)
+  followed by its text, the same prefix as `embed_text`, so chunks are self-identifying: "He was
+  born in 1879" under "Albert Einstein" names its subject. The prompt says the heading resolves
+  identity only and is not evidence for any other fact. The feedback says what's missing or contradicted. An empty or malformed
   evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
   is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.
