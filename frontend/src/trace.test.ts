@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { continuation, formatArgs, initialAssistantState, reduce, summaryLine, turnsUsed } from "./trace";
+import {
+  continuation,
+  finish,
+  formatArgs,
+  formatDuration,
+  initialAssistantState,
+  reduce,
+  stageTimes,
+  summaryLine,
+  turnsUsed,
+} from "./trace";
 import type { ChatEvent, Stage } from "./types";
 
 const MAX = 7;
@@ -24,7 +34,10 @@ const evaluation = (turn: number, verdict: "supported" | "unsupported"): ChatEve
   data: { turn, verdict, independent_answer: "", feedback: `fb${turn}` },
 });
 
-const run = (events: ChatEvent[]) => events.reduce(reduce, initialAssistantState());
+const run = (events: ChatEvent[]) => events.reduce((s, ev) => reduce(s, ev), initialAssistantState());
+/** Fold `[atMs, event]` pairs, stamping each event with its arrival time. */
+const runAt = (events: [number, ChatEvent][]) =>
+  events.reduce((s, [at, ev]) => reduce(s, ev, at), initialAssistantState(0));
 
 describe("reduce", () => {
   it("builds one flat timeline with several answer/evaluation cycles", () => {
@@ -142,6 +155,50 @@ describe("reduce", () => {
     expect(s.turns).toHaveLength(7);
     expect(continuation(s.turns[6], s.maxTurns)).toEqual({ kind: "exhausted" });
     expect(summaryLine(s)).toBe("7 turns · 6 tool calls · Out of turns");
+  });
+});
+
+describe("timing", () => {
+  it("times each turn, tool call, evaluation, the response and the whole query", () => {
+    const s = runAt([
+      [100, status("research", 1)],
+      [900, call("a", 1)],
+      [950, call("b", 1)],
+      [1400, result("b", "hits")],
+      [2100, result("a", "hits")],
+      [2200, status("research", 2)],
+      [4000, answered(2)],
+      [4000, status("evaluate", 2)],
+      [6500, evaluation(2, "supported")],
+      [6600, status("respond", null)],
+      [6600, { type: "outcome", data: { result: "supported", turns_used: 2 } }],
+      [9000, { type: "done", data: {} }],
+    ]);
+    const ms = (sp?: { start: number; end?: number }) => sp && sp.end! - sp.start;
+    expect(s.turns.map((t) => ms(t.span))).toEqual([2100, 1800]);
+    expect(s.turns[0].calls.map((c) => ms(c.span))).toEqual([1200, 450]);
+    expect(ms(s.turns[1].evalSpan)).toBe(2500);
+    expect(stageTimes(s, 99_999)).toEqual({ research: 3900, evaluate: 2500, respond: 2400, total: 9000 });
+  });
+
+  it("measures open steps up to now, and closes them on stop", () => {
+    const s = runAt([
+      [0, status("research", 1)],
+      [500, call("a", 1)],
+    ]);
+    expect(stageTimes(s, 2000)).toEqual({ research: 2000, evaluate: null, respond: null, total: 2000 });
+    const stopped = finish(s, "stopped", 3000);
+    expect(stopped.phase).toBe("stopped");
+    expect(stopped.span.end).toBe(3000);
+    expect(stopped.turns[0].span?.end).toBe(3000);
+    expect(stopped.turns[0].calls[0].span?.end).toBe(3000);
+    expect(stageTimes(stopped, 99_999).total).toBe(3000);
+  });
+
+  it("formats durations", () => {
+    expect(formatDuration(420)).toBe("420ms");
+    expect(formatDuration(3240)).toBe("3.2s");
+    expect(formatDuration(65_000)).toBe("1m 05s");
   });
 });
 
