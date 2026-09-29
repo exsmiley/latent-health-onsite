@@ -1,3 +1,4 @@
+import { useDevMode } from "../devMode";
 import type { AssistantState } from "../trace";
 import { Answer } from "./Answer";
 import { ChunkPopover, usePopover } from "./ChunkPopover";
@@ -6,12 +7,22 @@ import { Trace } from "./Trace";
 
 export function AssistantMessage({ state }: { state: AssistantState }) {
   const pop = usePopover();
+  const dev = useDevMode();
   const running = state.phase === "running";
   const streaming = running && state.text.length > 0;
 
   return (
     <div className="msg assistant">
-      <Trace state={state} />
+      {dev ? (
+        <Trace state={state} />
+      ) : (
+        running &&
+        !state.text && (
+          <div className="trace-pending">
+            <span className="spinner" /> Thinking…
+          </div>
+        )
+      )}
 
       {state.text && (
         <Answer

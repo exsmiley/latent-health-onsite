@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   continuation,
   formatArgs,
+  formatDuration,
   OUTCOME_LABEL,
+  spanMs,
+  stageTimes,
   summaryLine,
   type AssistantState,
+  type Span,
   type TurnState,
 } from "../trace";
 import type { OutcomeData, ResearchAnswerData, Stage, StatusData, Verdict } from "../types";
@@ -17,6 +21,24 @@ const STAGES: { key: Stage; label: string }[] = [
 
 const turnOf = (turn: number, max: number | null) => (max != null ? `Turn ${turn} / ${max}` : `Turn ${turn}`);
 
+/** The current time, re-rendering every `ms` while `active` so open spans tick. */
+function useNow(active: boolean, ms = 100): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [active, ms]);
+  return now;
+}
+
+function Duration({ span, now }: { span: Span | null | undefined; now: number }) {
+  const ms = spanMs(span, now);
+  if (ms == null) return null;
+  return <span className={`duration${span?.end == null ? " live" : ""}`}>{formatDuration(ms)}</span>;
+}
+
 export function Trace({ state }: { state: AssistantState }) {
   const running = state.phase === "running";
   const [open, setOpen] = useState(running);
@@ -27,6 +49,7 @@ export function Trace({ state }: { state: AssistantState }) {
     if (wasRunning.current && !running) setOpen(false);
     wasRunning.current = running;
   }, [running]);
+  const now = useNow(running);
 
   if (state.turns.length === 0 && !state.status) {
     return running ? (
@@ -56,9 +79,12 @@ export function Trace({ state }: { state: AssistantState }) {
             {state.status.turn != null && (
               <span className="muted trace-where">{turnOf(state.status.turn, state.maxTurns)}</span>
             )}
+            <Duration span={state.span} now={now} />
           </span>
         ) : (
-          <span className="muted trace-summary">{summaryLine(state)}</span>
+          <span className="muted trace-summary">
+            {summaryLine(state)} · <Duration span={state.span} now={now} />
+          </span>
         )}
       </summary>
 
@@ -73,10 +99,12 @@ export function Trace({ state }: { state: AssistantState }) {
               running={running}
               isLast={t.turn === lastTurn}
               status={state.status}
+              now={now}
             />
           ))}
         </ol>
         {state.outcome && <OutcomeLine outcome={state.outcome} maxTurns={state.maxTurns} />}
+        <StageTimes state={state} now={now} />
       </div>
     </details>
   );
@@ -95,6 +123,30 @@ function StageSteps({ stage }: { stage: Stage }) {
   );
 }
 
+function StageTimes({ state, now }: { state: AssistantState; now: number }) {
+  const t = stageTimes(state, now);
+  const parts: [string, number | null][] = [
+    ["Research", t.research],
+    ["Evaluation", t.evaluate],
+    ["Response", t.respond],
+  ];
+  return (
+    <div className="stage-times">
+      {parts.map(
+        ([label, ms]) =>
+          ms != null && (
+            <span key={label}>
+              {label} <span className="duration">{formatDuration(ms)}</span>
+            </span>
+          ),
+      )}
+      <span className="stage-total">
+        Total <span className="duration">{formatDuration(t.total)}</span>
+      </span>
+    </div>
+  );
+}
+
 function VerdictBadge({ verdict }: { verdict: Verdict }) {
   return (
     <span className={`badge ${verdict}`}>{verdict === "supported" ? "✓ Supported" : "✗ Unsupported"}</span>
@@ -107,12 +159,14 @@ function TurnView({
   running,
   isLast,
   status,
+  now,
 }: {
   t: TurnState;
   maxTurns: number | null;
   running: boolean;
   isLast: boolean;
   status: StatusData | null;
+  now: number;
 }) {
   const live = running && isLast;
   const thinking = live && status?.stage === "research" && t.calls.length === 0 && !t.answer;
@@ -123,7 +177,9 @@ function TurnView({
 
   return (
     <li className={`turn${tone ? ` ${tone}` : ""}`}>
-      <div className="turn-label">{turnOf(t.turn, maxTurns)}</div>
+      <div className="turn-label">
+        {turnOf(t.turn, maxTurns)} <Duration span={t.span} now={now} />
+      </div>
 
       {thinking && (
         <div className="muted small">
@@ -133,7 +189,7 @@ function TurnView({
 
       {t.calls.length > 0 && (
         <ul className="calls">
-          {t.calls.map(({ call, result }) => (
+          {t.calls.map(({ call, result, span }) => (
             <li key={call.id} className="call">
               <span className={`tool-name tool-${call.name}`}>{call.name}</span>
               <span className="call-args">{formatArgs(call.arguments)}</span>
@@ -144,7 +200,8 @@ function TurnView({
                   <span className="spinner" />
                 ) : (
                   <span className="muted">no result</span>
-                )}
+                )}{" "}
+                <Duration span={span} now={now} />
               </span>
             </li>
           ))}
@@ -155,7 +212,7 @@ function TurnView({
 
       {evaluating && (
         <div className="evaluation pending">
-          <span className="step-label">Evaluator</span> <span className="spinner" /> checking cited chunks…
+          <span className="step-label">Evaluator</span> <span className="spinner" /> checking cited chunks… <Duration span={t.evalSpan} now={now} />
         </div>
       )}
 
@@ -164,6 +221,7 @@ function TurnView({
           <div className="eval-head">
             <span className="step-label">Evaluator</span>
             <VerdictBadge verdict={t.evaluation.verdict} />
+            <Duration span={t.evalSpan} now={now} />
           </div>
           {t.evaluation.feedback && <p>{t.evaluation.feedback}</p>}
           {t.evaluation.independent_answer && (

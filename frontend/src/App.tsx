@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isMockMode, streamChat } from "./api";
 import { AssistantMessage } from "./components/AssistantMessage";
+import { DevModeContext, useDevModeSetting } from "./devMode";
 import { toHistory } from "./history";
-import { initialAssistantState, reduce, type AssistantState } from "./trace";
+import { finish, initialAssistantState, reduce, type AssistantState } from "./trace";
 import type { ChatEvent } from "./types";
 
 interface Exchange {
@@ -26,6 +27,7 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [busy, setBusy] = useState(false);
   const mock = isMockMode();
+  const [devMode, setDevMode] = useDevModeSetting();
 
   // Keep the view pinned to the bottom while streaming, unless the user scrolled up.
   useEffect(() => {
@@ -68,17 +70,19 @@ export default function App() {
         await streamChat(messages, onEvent, ctrl.signal);
         if (!sawDone) {
           update(id, (s) => ({
-            ...s,
-            phase: "done",
+            ...finish(s, "done"),
             errors: sawError ? s.errors : [...s.errors, "The connection closed before the answer finished."],
           }));
         }
       } catch (e) {
         if (ctrl.signal.aborted) {
-          update(id, (s) => ({ ...s, phase: "stopped" }));
+          update(id, (s) => finish(s, "stopped"));
         } else {
           const msg = e instanceof Error ? e.message : String(e);
-          update(id, (s) => ({ ...s, phase: "done", errors: [...s.errors, msg] }));
+          update(id, (s) => ({
+            ...finish(s, "done"),
+            errors: [...s.errors, msg],
+          }));
         }
       } finally {
         abortRef.current = null;
@@ -111,74 +115,86 @@ export default function App() {
   }, [input]);
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="logo" aria-hidden>
-            W
-          </span>
-          Wiki RAG
-        </div>
-        <div className="topbar-right">
-          {mock && <span className="tag mock">mock mode</span>}
-          {exchanges.length > 0 && (
-            <button className="ghost-btn" onClick={() => !busy && setExchanges([])} disabled={busy}>
-              New chat
-            </button>
-          )}
-        </div>
-      </header>
-
-      <main className="log">
-        {exchanges.length === 0 ? (
-          <div className="empty">
-            <h1>Ask Simple English Wikipedia</h1>
-            <p className="muted">
-              Answers are researched, checked by an evaluator against the cited passages, and then written
-              with citations.
-            </p>
-            <div className="examples">
-              {EXAMPLES.map((ex) => (
-                <button key={ex} className="example" onClick={() => void send(ex)}>
-                  {ex}
-                </button>
-              ))}
-            </div>
+    <DevModeContext.Provider value={devMode}>
+      <div className="app">
+        <header className="topbar">
+          <div className="brand">
+            <span className="logo" aria-hidden>
+              W
+            </span>
+            Wiki RAG
           </div>
-        ) : (
-          exchanges.map((x) => (
-            <section key={x.id} className="exchange">
-              <div className="msg user">{x.question}</div>
-              <AssistantMessage state={x.assistant} />
-            </section>
-          ))
-        )}
-        <div ref={bottomRef} />
-      </main>
+          <div className="topbar-right">
+            {mock && <span className="tag mock">mock mode</span>}
+            <label className="switch" title="Show the research trace and its timings">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={devMode}
+                onChange={(e) => setDevMode(e.target.checked)}
+              />
+              <span className="switch-track" aria-hidden />
+              Dev mode
+            </label>
+            {exchanges.length > 0 && (
+              <button className="ghost-btn" onClick={() => !busy && setExchanges([])} disabled={busy}>
+                New chat
+              </button>
+            )}
+          </div>
+        </header>
 
-      <form className="composer" onSubmit={onSubmit}>
-        <div className="composer-inner">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Ask a question…"
-            rows={1}
-            autoFocus
-            aria-label="Question"
-          />
-          {busy ? (
-            <button type="button" className="send stop" onClick={stop}>
-              Stop
-            </button>
+        <main className="log">
+          {exchanges.length === 0 ? (
+            <div className="empty">
+              <h1>Ask Simple English Wikipedia</h1>
+              <p className="muted">
+                Answers are researched, checked by an evaluator against the cited passages, and then written
+                with citations.
+              </p>
+              <div className="examples">
+                {EXAMPLES.map((ex) => (
+                  <button key={ex} className="example" onClick={() => void send(ex)}>
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : (
-            <button type="submit" className="send" disabled={!input.trim()}>
-              Send
-            </button>
+            exchanges.map((x) => (
+              <section key={x.id} className="exchange">
+                <div className="msg user">{x.question}</div>
+                <AssistantMessage state={x.assistant} />
+              </section>
+            ))
           )}
-        </div>
-      </form>
-    </div>
+          <div ref={bottomRef} />
+        </main>
+
+        <form className="composer" onSubmit={onSubmit}>
+          <div className="composer-inner">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Ask a question…"
+              rows={1}
+              autoFocus
+              aria-label="Question"
+            />
+            {busy ? (
+              <button type="button" className="send stop" onClick={stop}>
+                Stop
+              </button>
+            ) : (
+              <button type="submit" className="send" disabled={!input.trim()}>
+                Send
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+    </DevModeContext.Provider>
   );
 }
