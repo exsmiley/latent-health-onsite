@@ -2,6 +2,8 @@
 // The research agent has one flat budget of turns; the view model is a single timeline of turns.
 // A turn holds its tool calls and, when the agent gave a final answer on that turn, the
 // research_answer and the evaluator's verdict on it.
+// Timings are client-side: each event is stamped with its arrival time (`now`, ms). Events
+// stream live as the pipeline runs, so arrival times track the server's step boundaries.
 
 import type {
   ChatEvent,
@@ -15,9 +17,16 @@ import type {
   ToolResultData,
 } from "./types";
 
+/** A timed step: `end` stays unset while the step is still running. */
+export interface Span {
+  start: number;
+  end?: number;
+}
+
 export interface ToolCallState {
   call: ToolCallData;
   result?: ToolResultData;
+  span?: Span;
 }
 
 export interface TurnState {
@@ -25,6 +34,10 @@ export interface TurnState {
   calls: ToolCallState[];
   answer?: ResearchAnswerData;
   evaluation?: EvaluationData;
+  /** The research part of the turn: from its `status` to the next `status` (or the end). */
+  span?: Span;
+  /** The evaluator's check of this turn's answer. */
+  evalSpan?: Span;
 }
 
 export type Phase = "running" | "done" | "stopped";
@@ -39,9 +52,13 @@ export interface AssistantState {
   text: string;
   errors: string[];
   phase: Phase;
+  /** The whole query: from send to `done` (or stop / connection loss). */
+  span: Span;
+  /** Writing the final answer: from the `respond` status to the end. */
+  respondSpan: Span | null;
 }
 
-export const initialAssistantState = (): AssistantState => ({
+export const initialAssistantState = (now: number = Date.now()): AssistantState => ({
   status: null,
   maxTurns: null,
   turns: [],
@@ -50,7 +67,31 @@ export const initialAssistantState = (): AssistantState => ({
   text: "",
   errors: [],
   phase: "running",
+  span: { start: now },
+  respondSpan: null,
 });
+
+const close = (span: Span | undefined, now: number): Span | undefined =>
+  span && span.end == null ? { ...span, end: now } : span;
+
+/** Close every research span still open; a new `status` or the end of the run ends it. */
+const closeTurns = (turns: TurnState[], now: number): TurnState[] =>
+  turns.map((t) => (t.span && t.span.end == null ? { ...t, span: close(t.span, now) } : t));
+
+/** End the run: close every open step and set the final phase. */
+export function finish(state: AssistantState, phase: Phase, now: number = Date.now()): AssistantState {
+  return {
+    ...state,
+    phase,
+    span: close(state.span, now)!,
+    respondSpan: state.respondSpan && close(state.respondSpan, now)!,
+    turns: closeTurns(state.turns, now).map((t) => ({
+      ...t,
+      evalSpan: close(t.evalSpan, now),
+      calls: t.calls.map((c) => ({ ...c, span: close(c.span, now) })),
+    })),
+  };
+}
 
 function withTurn(turns: TurnState[], turn: number, update: (t: TurnState) => TurnState): TurnState[] {
   const idx = turns.findIndex((t) => t.turn === turn);
@@ -58,17 +99,22 @@ function withTurn(turns: TurnState[], turn: number, update: (t: TurnState) => Tu
   return turns.map((t, i) => (i === idx ? update(t) : t));
 }
 
-export function reduce(state: AssistantState, ev: ChatEvent): AssistantState {
+export function reduce(state: AssistantState, ev: ChatEvent, now: number = Date.now()): AssistantState {
   switch (ev.type) {
     case "status": {
       const d = ev.data;
-      const turns =
-        d.stage === "research" && d.turn != null ? withTurn(state.turns, d.turn, (t) => t) : state.turns;
-      return { ...state, status: d, maxTurns: d.max_turns ?? state.maxTurns, turns };
+      let turns = closeTurns(state.turns, now);
+      if (d.stage === "research" && d.turn != null)
+        turns = withTurn(turns, d.turn, (t) => ({ ...t, span: t.span ?? { start: now } }));
+      if (d.stage === "evaluate" && d.turn != null)
+        turns = withTurn(turns, d.turn, (t) => ({ ...t, evalSpan: { start: now } }));
+      const respondSpan = d.stage === "respond" ? (state.respondSpan ?? { start: now }) : state.respondSpan;
+      return { ...state, status: d, maxTurns: d.max_turns ?? state.maxTurns, turns, respondSpan };
     }
     case "tool_call": {
       const d = ev.data;
-      return { ...state, turns: withTurn(state.turns, d.turn, (t) => ({ ...t, calls: [...t.calls, { call: d }] })) };
+      const c: ToolCallState = { call: d, span: { start: now } };
+      return { ...state, turns: withTurn(state.turns, d.turn, (t) => ({ ...t, calls: [...t.calls, c] })) };
     }
     case "tool_result": {
       const d = ev.data;
@@ -76,7 +122,10 @@ export function reduce(state: AssistantState, ev: ChatEvent): AssistantState {
         ...state,
         turns: state.turns.map((t) =>
           t.calls.some((c) => c.call.id === d.id)
-            ? { ...t, calls: t.calls.map((c) => (c.call.id === d.id ? { ...c, result: d } : c)) }
+            ? {
+                ...t,
+                calls: t.calls.map((c) => (c.call.id === d.id ? { ...c, result: d, span: close(c.span, now) } : c)),
+              }
             : t,
         ),
       };
@@ -84,7 +133,14 @@ export function reduce(state: AssistantState, ev: ChatEvent): AssistantState {
     case "research_answer":
       return { ...state, turns: withTurn(state.turns, ev.data.turn, (t) => ({ ...t, answer: ev.data })) };
     case "evaluation":
-      return { ...state, turns: withTurn(state.turns, ev.data.turn, (t) => ({ ...t, evaluation: ev.data })) };
+      return {
+        ...state,
+        turns: withTurn(state.turns, ev.data.turn, (t) => ({
+          ...t,
+          evaluation: ev.data,
+          evalSpan: close(t.evalSpan, now),
+        })),
+      };
     case "outcome":
       return { ...state, outcome: ev.data };
     case "citations":
@@ -94,7 +150,7 @@ export function reduce(state: AssistantState, ev: ChatEvent): AssistantState {
     case "error":
       return { ...state, errors: [...state.errors, ev.data.message] };
     case "done":
-      return { ...state, phase: "done" };
+      return finish(state, "done", now);
     default:
       return state;
   }
@@ -130,6 +186,37 @@ export const OUTCOME_LABEL: Record<OutcomeResult, string> = {
   not_found: "✗ Not found",
   out_of_turns: "Out of turns",
 };
+
+/** Length of a span; an open span runs until `now`. Null when the step never started. */
+export function spanMs(span: Span | null | undefined, now: number): number | null {
+  if (!span) return null;
+  return Math.max(0, (span.end ?? now) - span.start);
+}
+
+/** Time per stage; research and evaluation sum over turns. Null for a stage that never ran. */
+export function stageTimes(
+  state: AssistantState,
+  now: number,
+): { research: number | null; evaluate: number | null; respond: number | null; total: number } {
+  const sum = (spans: (Span | undefined)[]) => {
+    const ms = spans.map((s) => spanMs(s, now)).filter((x): x is number => x != null);
+    return ms.length ? ms.reduce((a, b) => a + b, 0) : null;
+  };
+  return {
+    research: sum(state.turns.map((t) => t.span)),
+    evaluate: sum(state.turns.map((t) => t.evalSpan)),
+    respond: spanMs(state.respondSpan, now),
+    total: spanMs(state.span, now)!,
+  };
+}
+
+/** "850ms", "3.2s", "1m 05s". */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 

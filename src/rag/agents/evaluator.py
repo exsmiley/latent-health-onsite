@@ -2,8 +2,10 @@
 
 It makes one non-streaming call with a strict JSON-schema output. The input is ONLY the
 user's original latest question (plus, for follow-ups in a conversation, the research agent's
-version with references resolved), the cited chunk texts (numbered, with title/section) and,
-after a clear separator, the research answer. It never sees the chat history.
+version with references resolved), the cited chunk texts (numbered, each under a
+`title > section` heading, the same prefix as `embed_text`, so a chunk that says "He ..." is still
+self-identifying) and, after a clear separator, the research answer. It never sees the chat
+history.
 """
 
 from typing import Literal
@@ -20,6 +22,12 @@ numbered SOURCE PASSAGES, and (after a separator) a CANDIDATE ANSWER written by 
 The source passages are your ONLY evidence. Don't use outside knowledge, even if you are sure \
 of a fact. If something isn't stated in (or directly implied by) the passages, treat it as \
 unknown. The candidate answer is not evidence either.
+
+Each passage starts with a heading, "Article title > Section" (or just the title for an \
+article's opening passage), naming the Wikipedia article it comes from. The heading tells you \
+what the passage is about: in the article "Albert Einstein", "He was born in 1879" means \
+Einstein was born in 1879. Use headings only to resolve who or what a passage is about. \
+They are not evidence for anything else: a fact must still be stated in a passage's text.
 
 ## The question
 Judge against the user's question exactly as given. For a follow-up in a conversation you may \

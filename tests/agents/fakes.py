@@ -15,6 +15,7 @@ from openai.types.responses import (
 )
 
 import rag.agents.model
+from rag.config import get_settings
 from rag.tools import fetch, registry
 from rag.tools.models import Chunk, FetchResult
 
@@ -191,7 +192,17 @@ class ToolRecorder:
             return json.dumps({"chunks": found, "articles": []})
         return json.dumps(
             [
-                {"query": q, "hits": [{"chunk_id": 101, "title": "Albert Einstein"}]}
+                {
+                    "query": q,
+                    "hits": [
+                        {
+                            "chunk_id": 101,
+                            "title": "Albert Einstein",
+                            "text": CHUNKS[101].text,
+                            "token_count": 20,
+                        }
+                    ],
+                }
                 for q in args.get("queries", [])
             ]
         )
@@ -213,11 +224,15 @@ async def fake_fetch(chunk_ids: list[int] = [], article_ids: list[int] = []) -> 
 
 
 def install(
-    monkeypatch, script: list[Any], tools: ToolRecorder | None = None
+    monkeypatch, script: list[Any], tools: ToolRecorder | None = None, pre_retrieve: bool = False
 ) -> tuple[FakeClient, ToolRecorder]:
-    """Swap in the fake model client and fake tools (patched on the real tool modules)."""
+    """Swap in the fake model client and fake tools (patched on the real tool modules).
+
+    Pre-retrieval is off unless asked for, so scripts only have to cover the model's own turns.
+    """
     client = FakeClient(script)
     tools = tools or ToolRecorder()
+    monkeypatch.setattr(get_settings(), "research_pre_retrieve", pre_retrieve)
     monkeypatch.setattr(rag.agents.model, "get_client", lambda: client)
     monkeypatch.setattr(registry, "TOOL_SPECS", TOOL_SPECS)
     monkeypatch.setattr(registry, "dispatch", tools.dispatch)

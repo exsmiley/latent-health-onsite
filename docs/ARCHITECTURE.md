@@ -46,7 +46,7 @@ Full-dataset chunking gives 384k chunks: p50 111 / p90 276 / max 6.9k tokens, 54
 | `rag.tools.search` | tools | `async semantic_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` embeds all queries in one request, then runs the per-query vector searches concurrently. |
 | `rag.tools.keyword` | tools | `async keyword_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` uses Postgres FTS (`websearch_to_tsquery('english', q)` against `chunks.tsv`, ranked by `ts_rank_cd`), with the queries run concurrently. |
 | `rag.tools.fetch` | tools | `async fetch(chunk_ids: list[int] = [], article_ids: list[int] = []) -> FetchResult`. Articles return full text, uncapped, plus their `chunk_ids`. |
-| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`) and `async dispatch(name: str, args: dict) -> str` (runs a tool and returns the compact JSON string given back to the model). |
+| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`), `async dispatch(name: str, args: dict) -> str` (runs a tool and returns a compact JSON string; search hits carry full `text` and `token_count`) and `present(outputs: list[tuple[str, str]], shown: set[int], full_text: int \| None = None) -> list[str]` (shapes one turn's outputs for the model, see "Search hits"). |
 | `rag.agents.*` | agents | See below. |
 | `rag.api.app` | agents | FastAPI `app`. See the HTTP/SSE contract. |
 | `frontend/` | frontend | Chat UI. |
@@ -57,6 +57,21 @@ Result models live in `rag.tools.models` (`SearchHit`, `QueryResults`, `Chunk`, 
 semantic scores. The blurb is the first `blurb_words` (40) words of `chunks.text`, followed by "…" if
 truncated.
 
+### Search hits
+
+Hits carry full chunk text so the agent can cite straight from a search, without a fetch turn.
+After all of a turn's tool calls finish, `registry.present` shapes the search outputs (in call
+order) against the agent's `shown` set (chunk ids whose full text the model has already seen):
+
+- The first `hit_full_text` (3) hits of each query not already in `shown` get `text`, picked
+  rank by rank across every query of both search tools until `hit_text_budget_tokens` (5000,
+  by `chunks.token_count`) is spent. Chunks that don't fit are skipped.
+- Every other hit gets a `blurb`, and must be fetched before it is cited.
+- A chunk already listed earlier in the turn, or in `shown`, gets only `"seen": true` (no text).
+- Chunks returned by `fetch` (including an article's `chunk_ids`) are added to `shown`.
+
+Each hit keeps `chunk_id, article_id, title, section, score`. The UI summary is unchanged.
+
 ## Agent pipeline
 
 There is a single budget of `settings.research_max_turns` (7) research turns per question; there
@@ -64,6 +79,9 @@ are no rounds. A *turn* is one research-agent model call. Evaluator and responde
 count as turns.
 
 ```
+turn 0 (pre-retrieval, no model call, not a turn):
+    semantic_search(question) + keyword_search(its names/numbers) ──► fetch the top hits
+    └─ added to the conversation as function_call/function_call_output pairs
 for turn in 1..7:
     research agent model call (tools: semantic_search, keyword_search, fetch; tool_choice auto)
     ├─ made tool calls ──► run them concurrently, feed results back, next turn
@@ -76,6 +94,27 @@ for turn in 1..7:
 out of turns ──► fixed "couldn't find" reply
 ```
 
+- **Pre-retrieval** (`rag.agents.pre_retrieval`, `ResearchAgent.pre_retrieve`; on unless
+  `settings.research_pre_retrieve` is false). Before turn 1 the harness itself, with no model
+  call, runs `semantic_search` (top 8) on the question and `keyword_search` (top 5) on a query
+  made of the question's capitalized names (consecutive ones as a quoted phrase) and numbers,
+  at most 4 terms (skipped if there are none; a whole question ANDs every word and rarely
+  matches). It then fetches the top 5 semantic and top 2 keyword hits in full, dropping chunks
+  over 4,000 characters (big lists), so the model can cite without a turn of reading. Its
+  searches go through `registry.present` with no full-text hits (that fetch supplies the text,
+  so nothing is shown twice), and the fetched chunks are added to `shown`. For a
+  question with history, the semantic query is the previous user and assistant messages
+  (400 chars each, `[n]` markers removed) followed by the question, and the keyword query
+  falls back to that text when the question itself has no names. The calls go into the
+  conversation after the question as ordinary `function_call`/`function_call_output` pairs,
+  exactly as if the model had made them: the model already knows how to read and cite tool
+  outputs, and the fetched chunk ids sit next to the hits they came from. They emit
+  `status`/`tool_call`/`tool_result` events with turn 0, don't count toward `turns_used`, and
+  count as a search for the "not_found" rule if either search succeeded. The system prompt
+  tells the model to read them first and answer on turn 1 when they suffice, but only after
+  checking that every step of the question's chain and every item or side is stated in a chunk
+  it has read, and that facts about a subject come from the subject's own article (pre-retrieved
+  chunks resemble the question; they don't necessarily answer it).
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
   Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
@@ -90,13 +129,16 @@ out of turns ──► fixed "couldn't find" reply
   says what was searched and what was missing, and `answer`/`citations` are empty. It may
   answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
   search has run. The system prompt must explain that:
+  - full-text hits can be cited directly, blurb-only hits must be fetched first, and `seen`
+    hits refer to text shown earlier;
   - it should prefer fetching specific chunks over whole articles;
   - **citations must be chunk ids**, and the evaluator sees only the cited chunk text and will
     not accept whole articles;
   - it should cite the minimal sufficient set of chunks, except that a chain needs a chunk for
     every hop, and comparisons, superlatives, counts and "which of these" questions need
     evidence for every entity compared, not just the winner;
-  - every link of a chain must be found in the index, even if it knows the entity;
+  - every link of a chain must be found in the index, even if it knows the entity (each chunk
+    is shown to the evaluator under its title/section heading);
   - it should never guess, and should answer "not_found" after about two turns of fruitless
     focused searching;
   - it should answer as early as the evidence allows.
@@ -116,8 +158,11 @@ out of turns ──► fixed "couldn't find" reply
   passages establish EACH link. A final fact backed by the passages is not enough unless they
   also show it belongs to the thing the question describes. A link backed only by the
   candidate's claims or by outside knowledge, a compared entity without evidence, or an answer a
-  hop short or too far means `unsupported`. The feedback names the missing link or what's
-  contradicted. An empty or malformed
+  hop short or too far means `unsupported`. Each cited chunk is shown as `[n] {title} >
+  {section}` (or `[n] {title}`) followed by its text, the same prefix as `embed_text`, so chunks
+  are self-identifying: "He was born in 1879" under "Albert Einstein" names its subject. The
+  prompt says the heading resolves identity only and is not evidence for any other fact. The
+  feedback names the missing link or what's contradicted. An empty or malformed
   evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
   is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.
@@ -139,8 +184,8 @@ out of turns ──► fixed "couldn't find" reply
 
 | type | data |
 |---|---|
-| `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting; evaluate: the turn whose answer is checked; respond: null) |
-| `tool_call` | `{id: str, name: str, arguments: object, turn: int}` |
+| `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting, 0 for pre-retrieval; evaluate: the turn whose answer is checked; respond: null) |
+| `tool_call` | `{id: str, name: str, arguments: object, turn: int}` (turn 0: pre-retrieval, run by the harness before turn 1) |
 | `tool_result` | `{id: str, name: str, summary: str}` (e.g. "3 queries, 15 hits") |
 | `research_answer` | `{turn: int, status: "answered"\|"not_found"\|"invalid", answer: str, citations: int[], reason: str}` (every final message from the agent; "invalid" carries the error in `reason` and research continues) |
 | `evaluation` | `{turn: int, verdict: "supported"\|"unsupported", independent_answer: str, feedback: str}` |

@@ -11,7 +11,7 @@ export type Stage = "research" | "evaluate" | "respond";
 
 export interface StatusData {
   stage: Stage;
-  /** research: the turn starting; evaluate: the turn whose answer is checked; respond: null. */
+  /** research: the turn starting (0: pre-retrieval); evaluate: the turn whose answer is checked; respond: null. */
   turn: number | null;
   max_turns: number;
   message: string;
@@ -21,6 +21,7 @@ export interface ToolCallData {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /** 0: pre-retrieval, run by the harness before turn 1. */
   turn: number;
 }
 
