@@ -14,10 +14,11 @@ from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from rag import db
 from rag.agents import orchestrator
 from rag.agents.model import track_usage
 from rag.config import ROOT, get_settings
-from rag.evals import grading
+from rag.evals import grading, report
 from rag.tools import fetch as fetch_tool
 
 EVALS_DIR = ROOT / "evals"
@@ -479,9 +480,6 @@ async def main(
     out_dir: Path,
     label: str | None,
 ) -> Path:
-    from rag import db
-    from rag.evals import report
-
     questions = load_questions(set_name, file, ids, limit)
     if not questions:
         raise SystemExit("no questions selected")

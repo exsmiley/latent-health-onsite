@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import typer
 import uvicorn
@@ -6,6 +7,8 @@ import uvicorn
 from rag.agents.orchestrator import run_cli
 from rag.db import apply_schema
 from rag.embed.pool import run_embed
+from rag.evals.report import compare, load_run, resolve_run
+from rag.evals.runner import main as run_eval
 from rag.ingest.pipeline import run_ingest
 
 app = typer.Typer(no_args_is_help=True)
@@ -56,12 +59,8 @@ def eval_(
     label: str | None = typer.Option(None, help="Label added to the result file name"),
 ) -> None:
     """Benchmark the pipeline on the eval questions: accuracy, time, turns and tokens."""
-    from pathlib import Path
-
-    from rag.evals.runner import main
-
     asyncio.run(
-        main(
+        run_eval(
             set_name=set_name,
             file=Path(file) if file else None,
             ids=[i.strip() for i in ids.split(",") if i.strip()] if ids else None,
@@ -82,8 +81,6 @@ def eval_compare(
     run_b: str = typer.Argument(..., help="New results .jsonl (or its .summary.json)"),
 ) -> None:
     """Compare two eval runs: accuracy/time/turn deltas per tier and type, fixed and broken."""
-    from rag.evals.report import compare, load_run, resolve_run
-
     print(compare(load_run(run_a), load_run(run_b), resolve_run(run_a).name,
                   resolve_run(run_b).name))  # fmt: skip
 

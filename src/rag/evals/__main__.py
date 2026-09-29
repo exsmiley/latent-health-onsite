@@ -5,4 +5,4 @@ import sys
 from rag.cli import app
 
 if __name__ == "__main__":
-    app(["eval", *sys.argv[1:]], prog_name="rag eval")
+    app(["eval", *sys.argv[1:]], prog_name="rag")
