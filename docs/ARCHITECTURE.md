@@ -88,7 +88,8 @@ for turn in 1..7:
     └─ no tool calls   ──► its final message is a structured answer (JSON schema below)
          ├─ invalid (bad JSON, empty/unknown/non-chunk citations) ──► error fed back, next turn
          ├─ status "not_found" ──► fixed "couldn't find" reply, done (no evaluation)
-         └─ status "answered"  ──► Evaluator (sees ONLY the user's question + cited chunk texts)
+         └─ status "answered" or "premise_false"
+                            ──► Evaluator (sees ONLY the user's question + cited chunk texts)
               ├─ supported   ──► Responder ──stream──► user, done
               └─ unsupported ──► feedback added to the conversation, next turn
 out of turns ──► fixed "couldn't find" reply
@@ -118,17 +119,22 @@ out of turns ──► fixed "couldn't find" reply
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
   Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
-  must match the strict JSON schema `{question: str, status: "answered" | "not_found", answer:
-  str, citations: int[], reason: str}`, set via the Responses API `text.format`. `question` is
+  must match the strict JSON schema `{question: str, status: "answered" | "premise_false" |
+  "not_found", answer: str, citations: int[], reason: str}`, set via the Responses API `text.format`. `question` is
   the user's latest question with only pronouns and follow-up references resolved: it must keep
   every constraint and step, and is never shortened to a sub-question or the last hop of a
   chain. The evaluator judges against the user's ORIGINAL latest question; the rewrite is given
   to it only as a second, labelled "references resolved" version when there is chat history
-  (with no history it is ignored). The evaluator never sees the chat history. For "answered",
-  `answer` and chunk-id `citations` are required and `reason` is ""; for "not_found", `reason`
-  says what was searched and what was missing, and `answer`/`citations` are empty. It may
-  answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
-  search has run. The system prompt must explain that:
+  (with no history it is ignored). The evaluator never sees the chat history. For "answered"
+  and "premise_false", `answer` and chunk-id `citations` are required and `reason` is ""; for
+  "not_found", `reason` says what was searched and what was missing, and `answer`/`citations`
+  are empty. "premise_false" means the cited chunks contradict an assumption of the question
+  (e.g. "Who is the prince of Azerbaijan?" when it is a republic with a president): `answer`
+  corrects the premise and gives the closest true answer the corpus has, and the citations back
+  the contradicting facts and that answer. It is used only when read chunks contradict the
+  premise; a fact that is merely absent is "not_found". It may answer after any turn. A
+  "not_found" or "premise_false" is rejected (fed back as an error) until at least one search
+  has run. The system prompt must explain that:
   - full-text hits can be cited directly, blurb-only hits must be fetched first, and `seen`
     hits refer to text shown earlier;
   - it should prefer fetching specific chunks over whole articles;
@@ -140,7 +146,11 @@ out of turns ──► fixed "couldn't find" reply
   - every link of a chain must be found in the index, even if it knows the entity (each chunk
     is shown to the evaluator under its title/section heading);
   - it should never guess, and should answer "not_found" after about two turns of fruitless
-    focused searching;
+    focused searching, but first broaden (related titles, synonyms, historical senses such as
+    "crown prince", "governor of", the dynasty) rather than rephrase the same phrase;
+  - when a name has several referents in the corpus, it answers the main readings briefly, or
+    the likeliest one and names the alternative;
+  - when the chunks contradict the question's premise, it answers "premise_false";
   - it should answer as early as the evidence allows.
   Before each turn a developer note gives the remaining turns. The last one says that tool calls
   made on that turn can't be followed up, and that running out means the user is told the
@@ -161,15 +171,25 @@ out of turns ──► fixed "couldn't find" reply
   hop short or too far means `unsupported`. Each cited chunk is shown as `[n] {title} >
   {section}` (or `[n] {title}`) followed by its text, the same prefix as `embed_text`, so chunks
   are self-identifying: "He was born in 1879" under "Albert Einstein" names its subject. The
-  prompt says the heading resolves identity only and is not evidence for any other fact. The
+  prompt says the heading resolves identity only and is not evidence for any other fact. It
+  unpacks nested "the X of the Y of Z" phrases from the inside out, one hop per "of", and checks
+  that the answer is the outermost entity. A direct possessive or description ("Gustave
+  Eiffel's company") is enough for a naming or ownership link. An answer to an ambiguous
+  question that covers the main readings, or the likeliest one plus the alternative, is
+  acceptable. The candidate answer is labelled with its type; a premise correction is
+  `supported` when the passages establish positive facts contradicting the premise (a negative
+  such as "no prince" may be concluded from "is a republic with a president"), any closest true
+  answer is backed, and the correction addresses the question. The
   feedback names the missing link or what's contradicted. An empty or malformed
   evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
   is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.
 - **Responder** (`rag.agents.responder`). A streaming model call that takes the question, the
   research answer, the evaluator's independent answer and the cited chunks. It writes a concise
-  final answer with inline `[n]` markers, where n indexes the citations list. It runs only for
-  supported answers. For not found or out of turns, the orchestrator emits an empty `citations`
+  final answer with inline `[n]` markers, where n indexes the citations list. For a verified
+  "premise_false" answer it opens with a short correction and then gives the closest true
+  answer. It runs only for supported answers (a verified premise correction has outcome
+  `supported`). For not found or out of turns, the orchestrator emits an empty `citations`
   event and a single fixed "couldn't find the answer" `token` instead.
 - **Orchestrator** (`rag.agents.orchestrator`). `async run(question: str, history: list[dict]) ->
   AsyncIterator[Event]` yields the events below. `async run_cli(question)` prints them.
@@ -187,7 +207,7 @@ out of turns ──► fixed "couldn't find" reply
 | `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting, 0 for pre-retrieval; evaluate: the turn whose answer is checked; respond: null) |
 | `tool_call` | `{id: str, name: str, arguments: object, turn: int}` (turn 0: pre-retrieval, run by the harness before turn 1) |
 | `tool_result` | `{id: str, name: str, summary: str}` (e.g. "3 queries, 15 hits") |
-| `research_answer` | `{turn: int, status: "answered"\|"not_found"\|"invalid", answer: str, citations: int[], reason: str}` (every final message from the agent; "invalid" carries the error in `reason` and research continues) |
+| `research_answer` | `{turn: int, status: "answered"\|"premise_false"\|"not_found"\|"invalid", answer: str, citations: int[], reason: str}` (every final message from the agent; "premise_false" is an answer correcting a false premise, evaluated like "answered" and shown as "premise corrected"; "invalid" carries the error in `reason` and research continues) |
 | `evaluation` | `{turn: int, verdict: "supported"\|"unsupported", independent_answer: str, feedback: str}` |
 | `outcome` | `{result: "supported"\|"not_found"\|"out_of_turns", turns_used: int}` (sent once, right before `citations`) |
 | `citations` | `[{n: int, chunk_id: int, article_id: int, title: str, section: str\|null, url: str}]` (sent before tokens) |

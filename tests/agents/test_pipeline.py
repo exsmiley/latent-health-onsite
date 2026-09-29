@@ -25,6 +25,7 @@ from rag.agents.evaluator import evaluate, format_question
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
 from rag.agents.research import ANSWER_SCHEMA
 from rag.agents.research import SYSTEM_PROMPT as RESEARCH_PROMPT
+from rag.agents.responder import build_input as responder_build_input
 from rag.config import get_settings
 from rag.tools import fetch as fetch_tool
 
@@ -240,7 +241,7 @@ async def test_not_found_rejected_before_any_search(fake_env):
         ({"status": "answered", "answer": "", "citations": [101], "reason": ""},
          "non-empty string", [101]),
         ("I think it's 1879.", "not valid JSON", []),
-        ({"status": "maybe"}, '"answered" or "not_found"', []),
+        ({"status": "maybe"}, '"answered", "premise_false" or "not_found"', []),
         ("", "empty", []),
     ],
 )  # fmt: skip
@@ -604,3 +605,117 @@ async def test_unusable_evaluator_output_counts_as_unsupported(fake_env, raw):
     assert "could not be verified" in evals[0]["feedback"]
     assert only(evs, "error") == []
     assert "could not be verified" in last_input_text(client.calls[2])
+
+
+def premise_false(text: str, citations: list):
+    return final({"status": "premise_false", "answer": text, "citations": citations, "reason": ""})
+
+
+CORRECTION = "Einstein never won a Nobel Prize in Chemistry; he won the 1921 Physics prize."
+
+
+async def test_premise_false_is_evaluated_as_a_correction_and_responded(fake_env):
+    client, _ = fake_env(
+        [
+            search("Einstein Nobel Prize in Chemistry"),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["He won the 1921 Physics prize, not Chemistry [1]."]),
+        ]
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    assert only(evs, "research_answer") == [
+        {
+            "turn": 2,
+            "status": "premise_false",
+            "answer": CORRECTION,
+            "citations": [102],
+            "reason": "",
+        }
+    ]
+    ev_text = last_input_text(client.calls[2])
+    assert "type: PREMISE CORRECTION" in ev_text
+    assert "When did Einstein win the Nobel Prize in Chemistry?" in ev_text
+    assert "PREMISE IS FALSE" in last_input_text(client.calls[3])
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 2}]
+    assert [c["chunk_id"] for c in only(evs, "citations")[0]] == [102]
+    assert reply_text(evs).startswith("He won the 1921")
+
+
+async def test_plain_answer_is_labelled_as_answer_for_evaluator_and_responder(fake_env):
+    client, _ = fake_env([search(), answer("1879", [101]), verdict("supported"), Stream(["ok"])])
+    await collect()
+    assert "type: answer" in last_input_text(client.calls[2])
+    assert "PREMISE CORRECTION" not in last_input_text(client.calls[2])
+    assert "PREMISE IS FALSE" not in last_input_text(client.calls[3])
+
+
+async def test_premise_false_before_any_search_is_rejected(fake_env):
+    fake_env(
+        [
+            premise_false(CORRECTION, [102]),
+            search(),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    answers = only(evs, "research_answer")
+    assert [a["status"] for a in answers] == ["invalid", "premise_false"]
+    assert "without searching" in answers[0]["reason"]
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+async def test_rejected_premise_correction_feeds_back_and_research_continues(fake_env):
+    client, _ = fake_env(
+        [
+            search(),
+            premise_false("There is no such prize.", [101]),
+            verdict("unsupported", feedback="No passage contradicts the premise."),
+            answer("1879", [101]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    evs = await collect()
+    assert [e["verdict"] for e in only(evs, "evaluation")] == ["unsupported", "supported"]
+    assert "No passage contradicts the premise." in last_input_text(client.calls[3])
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+async def test_ambiguous_answer_covering_two_readings_is_accepted(fake_env):
+    both = "Two readings: Einstein was born in 1879; he won the Nobel Prize in 1921."
+    client, _ = fake_env([search(), answer(both, [101, 102]), verdict("supported"), Stream(["ok"])])
+    evs = await collect("When was Einstein's big year?")
+    assert only(evs, "research_answer")[0]["status"] == "answered"
+    ev_text = last_input_text(client.calls[2])
+    assert "[1] Albert Einstein\n" in ev_text
+    assert "[2] Albert Einstein > Nobel Prize" in ev_text
+    assert both in ev_text
+    assert only(evs, "outcome")[0]["result"] == "supported"
+
+
+def test_prompts_cover_premises_ambiguity_broadening_hops_and_naming():
+    ev = EVALUATOR_PROMPT
+    assert "## Premise corrections" in ev
+    assert "A negative may be concluded from positive facts" in ev
+    assert "the correction addresses what the question asked" in ev
+    assert "## Ambiguous questions" in ev
+    assert "names the alternative" in ev
+    assert 'from the INSIDE OUT, one hop per "of"' in ev
+    assert "outermost" in ev
+    assert 'don\'t demand the literal phrase "named after"' in ev
+    rp = RESEARCH_PROMPT
+    assert "## False premises" in rp
+    assert 'Use "premise_false" ONLY when chunks you have read contradict the premise' in rp
+    assert 'that\'s "not_found"' in rp
+    assert "## Ambiguous questions" in rp
+    assert "Broaden before giving up" in rp and "crown prince" in rp
+    assert ANSWER_SCHEMA["properties"]["status"]["enum"] == [
+        "answered",
+        "premise_false",
+        "not_found",
+    ]
+    assert "Correct it" in responder_build_input("q", "a", None, [], premise_false=True)
+    assert "PREMISE IS FALSE" not in responder_build_input("q", "a", None, [])

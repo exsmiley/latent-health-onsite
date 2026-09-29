@@ -5,7 +5,8 @@ A *turn* is one research model call; the orchestrator gives each question a sing
 with any function call is a tool turn: the calls run concurrently and their outputs go back to
 the model (any message text in that response, e.g. a commentary preamble, is ignored). A
 response with no function call is the agent's final answer, a JSON object matching
-`ANSWER_SCHEMA` (set via `text.format`). The orchestrator evaluates "answered" answers and, if
+`ANSWER_SCHEMA` (set via `text.format`). The orchestrator evaluates "answered" and
+"premise_false" answers and, if
 the evaluator rejects one, adds its feedback to the same conversation and keeps going.
 """
 
@@ -13,7 +14,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from rag.agents import events, model, pre_retrieval
 from rag.agents.events import Event
@@ -22,6 +23,8 @@ from rag.tools import registry
 from rag.tools.models import Chunk
 
 SEARCH_TOOLS = {"semantic_search", "keyword_search"}
+STATUSES = ("answered", "premise_false", "not_found")
+AnswerKind = Literal["answered", "premise_false"]
 
 ANSWER_SCHEMA: dict = {
     "type": "object",
@@ -37,12 +40,18 @@ ANSWER_SCHEMA: dict = {
         },
         "status": {
             "type": "string",
-            "enum": ["answered", "not_found"],
-            "description": '"answered" if your cited chunks state the answer, else "not_found".',
+            "enum": ["answered", "premise_false", "not_found"],
+            "description": (
+                '"answered" if your cited chunks state the answer; "premise_false" if they '
+                'contradict an assumption the question makes; otherwise "not_found".'
+            ),
         },
         "answer": {
             "type": "string",
-            "description": 'A complete, direct answer to the question ("" for not_found).',
+            "description": (
+                "A complete, direct answer to the question. For premise_false: the correction "
+                'plus the closest true answer the sources give. "" for not_found.'
+            ),
         },
         "citations": {
             "type": "array",
@@ -110,11 +119,15 @@ did Marie Curie die?". Keep EVERY constraint and step of the user's question: ne
 to a sub-question or to the last hop of a chain, and never replace a described entity with the \
 one you think it is ("the river that flows through the city where X was born" stays as it is). \
 The evaluator checks your answer against the user's own question.
-- `status`: "answered" or "not_found".
-- `answer`: for "answered", a complete, direct answer to the question. "" for "not_found".
-- `citations`: for "answered", the chunk ids that support the answer. [] for "not_found".
+- `status`: "answered", "premise_false" or "not_found".
+- `answer`: for "answered", a complete, direct answer to the question. For "premise_false", a \
+short correction of the false premise plus the closest true answer the sources give. "" for \
+"not_found".
+- `citations`: for "answered" and "premise_false", the chunk ids that support the answer (for \
+"premise_false": the facts that contradict the premise, and the closest true answer). [] for \
+"not_found".
 - `reason`: for "not_found", one or two sentences on what you searched for and what was \
-missing. "" for "answered".
+missing. "" otherwise.
 You can reply with your answer after any turn, as soon as you're ready. While you still want \
 to research, call tools instead; a reply without tool calls always ends your research.
 
@@ -156,12 +169,34 @@ something is missing or the sources conflict.
 keyword, a few phrasings, plus reading the most relevant chunks, e.g. the subject's own \
 article) find nothing that answers the question, reply with status "not_found". Don't keep \
 rephrasing the same search, and never search for guessed answers (e.g. candidate names).
+6. Broaden before giving up. If the exact phrase finds nothing, the fact may be filed under \
+another name: try related article titles, synonyms, and older or historical senses of the \
+term (for "prince of X": "crown prince", "governor of X", "ruler of X", the ruling dynasty or \
+the region's history article). Change the angle; don't just reword the same phrase.
+
+## False premises
+Some questions assume something the sources contradict (e.g. "Who is the prince of \
+Azerbaijan?" when Azerbaijan is a republic with a president). Then reply with status \
+"premise_false": in `answer`, say briefly what is actually the case, then give the closest true \
+answer the sources have (e.g. the Qajar crown princes who governed Iran's Azerbaijan province), \
+and cite chunks that state the contradicting facts and the closest answer. Positive facts that \
+rule the premise out ("is a republic", "its head of state is the president") are the evidence; \
+you don't need a chunk saying "there is no prince". Use "premise_false" ONLY when chunks you \
+have read contradict the premise, never just because you found nothing. If the fact is simply \
+absent, that's "not_found".
+
+## Ambiguous questions
+If a name or term in the question has several referents in the corpus (two people, a city and \
+a river, a band and an album), don't silently pick one. Either answer the main readings \
+briefly ("Georgia the country ...; the US state ..."), or answer the likeliest and name the \
+alternative in one sentence. Cite the chunks for each reading you answer. Use status \
+"answered".
 
 ## Never guess
 Never answer with anything that the chunks you have read don't state. A made-up or inferred \
 answer will be rejected and wastes the user's time. "not_found" is always better than a guess. \
 Never write "not found" or "the sources don't say" as an "answered" answer; use status \
-"not_found". You can only reply "not_found" after you have searched.
+"not_found". You can only reply "not_found" or "premise_false" after you have searched.
 
 ## Citations (read carefully)
 - Citations MUST be chunk ids. Article ids are rejected.
@@ -207,6 +242,7 @@ class Submission:
     answer: str
     citations: list[int]
     chunks: list[Chunk]  # same order as `citations`
+    status: AnswerKind = "answered"  # "premise_false": the answer corrects the premise
 
 
 @dataclass
@@ -313,7 +349,8 @@ class ResearchAgent:
     async def run_turn(self, turn: int, max_turns: int) -> AsyncIterator[Event]:
         """Run one research turn, yielding status/tool_call/tool_result/research_answer events.
 
-        Afterwards `self.submission` holds an accepted "answered" reply, `self.not_found` the
+        Afterwards `self.submission` holds an accepted "answered" or "premise_false" reply
+        (see `Submission.status`), `self.not_found` the
         reason of an accepted "not_found" reply, or both are None (a tool turn, or an invalid
         answer that was fed back to the model).
         """
@@ -358,12 +395,17 @@ class ResearchAgent:
                 'You replied "not_found" without searching. Search the index '
                 "(semantic_search and keyword_search) first."
             )
+        elif error is None and data["status"] == "premise_false" and not self.searched:
+            error = (
+                'You replied "premise_false" without searching. Search the index for evidence '
+                "that contradicts the premise first."
+            )
         elif error is None:
             submission, error = await validate_submission(data, fallback_question=self.question)
             if submission is not None:
                 self.submission = submission
                 yield events.research_answer(
-                    turn, "answered", submission.answer, submission.citations, ""
+                    turn, submission.status, submission.answer, submission.citations, ""
                 )
                 return
 
@@ -471,15 +513,19 @@ def _parse_answer(raw: str) -> tuple[dict | None, str | None]:
             "Your reply was not valid JSON. A reply without tool calls must be the JSON answer "
             "object with status, answer, citations and reason."
         )
-    if not isinstance(data, dict) or data.get("status") not in ("answered", "not_found"):
-        return None, 'The answer must be a JSON object whose status is "answered" or "not_found".'
+    if not isinstance(data, dict) or data.get("status") not in STATUSES:
+        return None, (
+            'The answer must be a JSON object whose status is "answered", "premise_false" or '
+            '"not_found".'
+        )
     return data, None
 
 
 async def validate_submission(
     args: dict, fallback_question: str
 ) -> tuple[Submission | None, str | None]:
-    """Check an "answered" reply. Returns (submission, None) or (None, error message).
+    """Check an "answered" or "premise_false" reply. Returns (submission, None) or (None,
+    error message).
 
     `fallback_question` is used when the reply has no standalone `question`.
     """
@@ -520,6 +566,7 @@ async def validate_submission(
             answer=answer.strip(),
             citations=ids,
             chunks=[by_id[i] for i in ids],
+            status="premise_false" if args.get("status") == "premise_false" else "answered",
         ),
         None,
     )

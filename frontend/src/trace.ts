@@ -12,6 +12,7 @@ import type {
   OutcomeData,
   OutcomeResult,
   ResearchAnswerData,
+  ResearchAnswerStatus,
   StatusData,
   ToolCallData,
   ToolResultData,
@@ -179,6 +180,19 @@ export function continuation(
   if (maxTurns == null) return { kind: "continue", turnsLeft: null };
   const left = maxTurns - t.turn;
   return left > 0 ? { kind: "continue", turnsLeft: left } : { kind: "exhausted" };
+}
+
+/** Label for a research answer in the trace. */
+export const ANSWER_LABEL: Record<ResearchAnswerStatus, string> = {
+  answered: "Answer",
+  premise_false: "Premise corrected",
+  not_found: "Not found",
+  invalid: "Invalid answer",
+};
+
+/** Answers the evaluator checks: a plain answer or a premise correction. */
+export function isEvaluated(a: ResearchAnswerData | null | undefined): boolean {
+  return a?.status === "answered" || a?.status === "premise_false";
 }
 
 export const OUTCOME_LABEL: Record<OutcomeResult, string> = {

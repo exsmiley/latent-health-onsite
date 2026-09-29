@@ -41,7 +41,11 @@ question wins.
 link of the chain it describes (e.g. "the teacher of the philosopher who taught Alexander" is \
 two links: who taught Alexander, then who taught that person), every constraint (dates, places, \
 "first", "Italian", ...), every entity being compared or counted, and finally the exact thing \
-the question ASKS for (which entity, at which hop, which attribute).
+the question ASKS for (which entity, at which hop, which attribute). Unpack nested \
+"the X of the Y of Z" phrases from the INSIDE OUT, one hop per "of": "the teacher of the \
+teacher of Alexander's tutor" is (1) Alexander's tutor, (2) the tutor's teacher, (3) THAT \
+person's teacher, and the answer must be the entity at the last, outermost hop (3), not an \
+intermediate one.
 2. independent_answer: answer the question yourself using ONLY the source passages, as if the \
 candidate answer did not exist, following your requirements one by one. For each link, say \
 which passage establishes it, or that no passage does. Be specific (names, numbers, dates). If \
@@ -61,12 +65,14 @@ question leads to);
 give the needed fact for EVERY entity compared, so the winner or count can't be confirmed;
      - the answer names the wrong thing: stops a hop short or goes a hop too far (e.g. names \
 the teacher when the question asks for the teacher's teacher), or gives a different \
-attribute than the one asked for;
+attribute than the one asked for. Count the hops of your requirements and check that the \
+answer is the outermost entity;
      - the candidate has a substantive claim the passages don't back, contradicts the \
 passages, answers a different question, or misses a part of the question.
    - A "not found" answer (the candidate says the answer can't be found, isn't in the \
 sources, or can't be determined) is ALWAYS "unsupported", even when the passages really don't \
-answer the question. The research agent must keep looking.
+answer the question. The research agent must keep looking. A premise correction (below) is \
+not a "not found" answer.
 4. feedback: for "unsupported", say exactly what's missing, unbacked or contradicted, and name \
 each missing link, so the research agent knows what evidence to find or what to remove (e.g. \
 "No passage shows that the composer who conducted the premiere is Liszt's son-in-law"; "No \
@@ -74,6 +80,34 @@ passage gives the birth date of X, so 'oldest' can't be checked"; "Passage [2] s
 "The question asks for the teacher of the teacher; the answer names only the first teacher"). \
 For a "not found" answer, suggest different search angles (other wordings, related articles, \
 exact names for keyword search). For "supported", briefly confirm which passages back each link.
+
+## What counts as establishing a link
+A link must be stated in (or directly implied by) a passage, but not necessarily in the \
+question's words. A direct possessive or description is enough for a naming or ownership \
+link: "Gustave Eiffel's engineering company" establishes that the company is Eiffel's, and is \
+named after him when the question says so; don't demand the literal phrase "named after". \
+Headings resolve who a passage is about.
+
+## Premise corrections
+The CANDIDATE ANSWER is labelled with its type. A "premise correction" says the question \
+assumes something false (e.g. "Who is the prince of Azerbaijan?" when Azerbaijan is a republic) \
+and gives the closest true answer. For it:
+- requirements: list the premise the question assumes, and the positive facts that would \
+contradict it.
+- "supported" when the passages establish positive facts that contradict the premise, and the \
+correction addresses what the question asked. A negative may be concluded from positive facts: \
+"Azerbaijan is a republic whose head of state is the president" establishes that it has no \
+national prince, without a passage saying "there is no prince". Any closest true answer it \
+adds (e.g. crown princes who governed a region of the same name) must also be backed by the \
+passages.
+- "unsupported" when the passages don't contradict the premise (the fact is merely absent, \
+which is not a correction), or when the correction dodges the question.
+
+## Ambiguous questions
+If a name or term in the question has several referents, an answer that briefly covers the \
+main readings, or answers the likeliest reading and names the alternative, is fine, as long as \
+the passages back what it says about each reading. Don't reject it for covering more than one \
+reading or for picking a reasonable one.
 
 Judge only support by the passages. Don't judge style, length or real-world truth."""
 
@@ -136,8 +170,18 @@ def format_question(question: str, resolved_question: str | None = None) -> str:
 
 
 def build_input(
-    question: str, answer: str, chunks: list[Chunk], resolved_question: str | None = None
+    question: str,
+    answer: str,
+    chunks: list[Chunk],
+    resolved_question: str | None = None,
+    status: str = "answered",
 ) -> str:
+    label = (
+        "CANDIDATE ANSWER (from the research agent; type: PREMISE CORRECTION, it says the "
+        "question's premise is false):"
+        if status == "premise_false"
+        else "CANDIDATE ANSWER (from the research agent; type: answer):"
+    )
     return (
         f"{format_question(question, resolved_question)}\n\n"
         f"SOURCE PASSAGES ({len(chunks)}):\n\n{format_sources(chunks)}\n\n"
@@ -145,19 +189,24 @@ def build_input(
         "List the question's requirements and write your independent answer from the sources "
         "above BEFORE you consider the candidate answer below. The candidate answer is NOT "
         "evidence.\n\n"
-        f"CANDIDATE ANSWER (from the research agent):\n{answer}"
+        f"{label}\n{answer}"
     )
 
 
 async def evaluate(
-    question: str, answer: str, chunks: list[Chunk], resolved_question: str | None = None
+    question: str,
+    answer: str,
+    chunks: list[Chunk],
+    resolved_question: str | None = None,
+    status: str = "answered",
 ) -> Evaluation:
     """Judge `answer` against the user's own `question`.
 
     `resolved_question` is the research agent's standalone rewrite. Pass it only for follow-ups
     (when there is chat history); without history the rewrite adds nothing and could drop steps.
+    `status` is the research answer's status; "premise_false" is judged as a premise correction.
     """
-    content = build_input(question, answer, chunks, resolved_question)
+    content = build_input(question, answer, chunks, resolved_question, status)
     response = await model.create(
         instructions=SYSTEM_PROMPT,
         input=[{"role": "user", "content": content}],

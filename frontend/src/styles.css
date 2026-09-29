@@ -439,6 +439,9 @@ a {
 .proposed.not-found {
   border-left: 3px solid var(--warn);
 }
+.proposed.premise-false {
+  border-left: 3px solid var(--accent);
+}
 .continue {
   margin: 6px 0 2px;
   color: var(--bad);

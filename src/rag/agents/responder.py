@@ -19,7 +19,12 @@ mention the research agent or the fact-checker.
 the sources.
 - Add inline citation markers like [1] or [2][3] right after the claims they support. n is \
 the source number. Use only numbers that exist in SOURCES, and cite every factual claim.
-- Plain text or light Markdown. No reference list at the end (the app shows the sources)."""
+- Plain text or light Markdown. No reference list at the end (the app shows the sources).
+- If the input says the question's PREMISE IS FALSE, open with a short, polite correction of \
+the premise (one sentence, with citations), then give the closest true answer from the \
+sources. Don't lecture, and don't pretend the premise holds.
+- If the question is ambiguous and the draft covers several readings, keep them short and \
+clearly separated, or answer the likeliest and name the alternative in one sentence."""
 
 
 def build_input(
@@ -27,11 +32,19 @@ def build_input(
     answer: str,
     evaluation: Evaluation | None,
     chunks: list[Chunk],
+    premise_false: bool = False,
 ) -> str:
     sources = format_sources(chunks) if chunks else "(none)"
     checker = evaluation.independent_answer if evaluation else "(not available)"
+    note = (
+        "NOTE: the question's PREMISE IS FALSE (verified against the sources). Correct it "
+        "briefly, then give the closest true answer.\n\n"
+        if premise_false
+        else ""
+    )
     return (
         f"QUESTION:\n{question}\n\n"
+        f"{note}"
         f"SOURCES:\n\n{sources}\n\n"
         f"DRAFT ANSWER:\n{answer or '(none)'}\n\n"
         f"FACT-CHECKER'S ANSWER FROM THE SOURCES ALONE:\n{checker}"
@@ -44,6 +57,7 @@ async def respond(
     answer: str,
     evaluation: Evaluation | None,
     chunks: list[Chunk],
+    premise_false: bool = False,
 ) -> AsyncIterator[str]:
     """Only called for evaluator-supported answers; not-found is handled by the orchestrator."""
     items: list[dict] = [
@@ -51,6 +65,11 @@ async def respond(
         for m in history
         if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
     ]
-    items.append({"role": "user", "content": build_input(question, answer, evaluation, chunks)})
+    items.append(
+        {
+            "role": "user",
+            "content": build_input(question, answer, evaluation, chunks, premise_false),
+        }
+    )
     async for delta in model.stream_text(instructions=SYSTEM_PROMPT, input=items):
         yield delta

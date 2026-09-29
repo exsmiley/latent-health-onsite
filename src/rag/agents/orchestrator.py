@@ -70,6 +70,7 @@ async def run(question: str, history: list[dict] | None = None) -> AsyncIterator
                 sub.answer,
                 sub.chunks,
                 resolved_question=sub.question if agent.has_history else None,
+                status=sub.status,
             )
             yield events.evaluation(
                 turn, evaluation.verdict, evaluation.independent_answer, evaluation.feedback
@@ -99,6 +100,7 @@ async def run(question: str, history: list[dict] | None = None) -> AsyncIterator
                 answer=final.answer,
                 evaluation=final_eval,
                 chunks=final.chunks,
+                premise_false=final.status == "premise_false",
             ):
                 yield events.token(delta)
     except Exception as exc:  # noqa: BLE001 - reported to the client as an error event

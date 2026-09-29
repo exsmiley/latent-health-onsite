@@ -18,7 +18,7 @@ EventType = Literal[
     "error",
 ]
 Stage = Literal["research", "evaluate", "respond"]
-AnswerStatus = Literal["answered", "not_found", "invalid"]
+AnswerStatus = Literal["answered", "premise_false", "not_found", "invalid"]
 OutcomeResult = Literal["supported", "not_found", "out_of_turns"]
 
 

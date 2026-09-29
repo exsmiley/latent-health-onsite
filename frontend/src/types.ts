@@ -31,9 +31,12 @@ export interface ToolResultData {
   summary: string;
 }
 
-export type ResearchAnswerStatus = "answered" | "not_found" | "invalid";
+export type ResearchAnswerStatus = "answered" | "premise_false" | "not_found" | "invalid";
 
-/** Every final (tool-call-free) message from the research agent. "invalid" carries the error in `reason`. */
+/**
+ * Every final (tool-call-free) message from the research agent. "invalid" carries the error in `reason`.
+ * "premise_false" is an answer that corrects a false premise in the question; it is evaluated like "answered".
+ */
 export interface ResearchAnswerData {
   turn: number;
   status: ResearchAnswerStatus;
