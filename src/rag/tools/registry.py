@@ -219,18 +219,21 @@ async def dispatch(name: str, args: dict | str) -> str:
 # ---- what the model sees ------------------------------------------------------------------
 
 
-def present(outputs: list[tuple[str, str]], shown: set[int]) -> list[str]:
+def present(
+    outputs: list[tuple[str, str]], shown: set[int], full_text: int | None = None
+) -> list[str]:
     """Shape one turn's tool outputs (`(name, dispatch output)`, in call order) for the model.
 
     Search hits carry full chunk text so the agent can cite straight from them. The first
-    `hit_full_text` hits of each query that weren't shown in an earlier turn get their `text`,
-    taken rank by rank across every query of the turn until `hit_text_budget_tokens` is spent.
-    Other hits get a `blurb`. A chunk already shown (earlier in this turn, or with full text in
-    an earlier turn, including via fetch) is only referenced with `"seen": true`. `shown` (the
-    chunk ids whose full text the model has seen) is updated in place. Fetch results and errors
-    pass through unchanged.
+    `full_text` (default `hit_full_text`) hits of each query that weren't shown in an earlier
+    turn get their `text`, taken rank by rank across every query of the turn until
+    `hit_text_budget_tokens` is spent. Other hits get a `blurb`. A chunk already shown (earlier
+    in this turn, or with full text in an earlier turn, including via fetch) is only referenced
+    with `"seen": true`. `shown` (the chunk ids whose full text the model has seen) is updated
+    in place. Fetch results and errors pass through unchanged.
     """
     settings = get_settings()
+    per_query = settings.hit_full_text if full_text is None else full_text
     parsed: list[list | None] = []
     for name, out in outputs:
         data = _load(out)
@@ -242,14 +245,14 @@ def present(outputs: list[tuple[str, str]], shown: set[int]) -> list[str]:
 
     # Pick the full-text hits: rank 1 of every query first, so the budget is spread evenly.
     candidates = [
-        [h for h in q.get("hits", []) if h.get("chunk_id") not in shown][: settings.hit_full_text]
+        [h for h in q.get("hits", []) if h.get("chunk_id") not in shown][:per_query]
         for data in parsed
         if data
         for q in data
     ]
     full: set[int] = set()
     budget = settings.hit_text_budget_tokens
-    for rank in range(settings.hit_full_text):
+    for rank in range(per_query):
         for hits in candidates:
             if rank < len(hits) and hits[rank]["chunk_id"] not in full:
                 cost = hits[rank].get("token_count", 0)

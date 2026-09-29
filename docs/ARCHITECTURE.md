@@ -46,7 +46,7 @@ Full-dataset chunking gives 384k chunks: p50 111 / p90 276 / max 6.9k tokens, 54
 | `rag.tools.search` | tools | `async semantic_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` embeds all queries in one request, then runs the per-query vector searches concurrently. |
 | `rag.tools.keyword` | tools | `async keyword_search(queries: list[str], top_k: int = 5) -> list[QueryResults]` uses Postgres FTS (`websearch_to_tsquery('english', q)` against `chunks.tsv`, ranked by `ts_rank_cd`), with the queries run concurrently. |
 | `rag.tools.fetch` | tools | `async fetch(chunk_ids: list[int] = [], article_ids: list[int] = []) -> FetchResult`. Articles return full text, uncapped, plus their `chunk_ids`. |
-| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`), `async dispatch(name: str, args: dict) -> str` (runs a tool and returns a compact JSON string; search hits carry full `text` and `token_count`) and `present(outputs: list[tuple[str, str]], shown: set[int]) -> list[str]` (shapes one turn's outputs for the model, see "Search hits"). |
+| `rag.tools.registry` | tools | `TOOL_SPECS: list[dict]` (OpenAI Responses API function-tool definitions for `semantic_search`, `keyword_search`, `fetch`), `async dispatch(name: str, args: dict) -> str` (runs a tool and returns a compact JSON string; search hits carry full `text` and `token_count`) and `present(outputs: list[tuple[str, str]], shown: set[int], full_text: int \| None = None) -> list[str]` (shapes one turn's outputs for the model, see "Search hits"). |
 | `rag.agents.*` | agents | See below. |
 | `rag.api.app` | agents | FastAPI `app`. See the HTTP/SSE contract. |
 | `frontend/` | frontend | Chat UI. |
@@ -100,7 +100,9 @@ out of turns ──► fixed "couldn't find" reply
   made of the question's capitalized names (consecutive ones as a quoted phrase) and numbers,
   at most 4 terms (skipped if there are none; a whole question ANDs every word and rarely
   matches). It then fetches the top 5 semantic and top 2 keyword hits in full, dropping chunks
-  over 4,000 characters (big lists), so the model can cite without a turn of reading. For a
+  over 4,000 characters (big lists), so the model can cite without a turn of reading. Its
+  searches go through `registry.present` with no full-text hits (that fetch supplies the text,
+  so nothing is shown twice), and the fetched chunks are added to `shown`. For a
   question with history, the semantic query is the previous user and assistant messages
   (400 chars each, `[n]` markers removed) followed by the question, and the keyword query
   falls back to that text when the question itself has no names. The calls go into the

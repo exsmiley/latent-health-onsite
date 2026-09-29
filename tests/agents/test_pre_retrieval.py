@@ -57,6 +57,27 @@ async def test_pre_retrieval_runs_before_turn_1_as_turn_0(fake_env):
     assert f"Turn 1 of {max_turns}" in items[7]["content"]
 
 
+async def test_pre_retrieved_chunks_are_shown_once(fake_env):
+    client, _ = fake_env(
+        [search(), answer("14 March 1879.", [101]), verdict("supported"), Stream(["1879 [1]"])],
+        pre_retrieve=True,
+    )
+    await collect("When was Albert Einstein born in 1879?")
+
+    # The pre-retrieval searches show a blurb (then a reference to the repeat); the full text
+    # comes once, from its fetch.
+    pairs = client.calls[0]["input"][1:7]
+    semantic_hit = json.loads(pairs[1]["output"])[0]["hits"][0]
+    keyword_hit = json.loads(pairs[3]["output"])[0]["hits"][0]
+    assert "text" not in semantic_hit and semantic_hit["blurb"]
+    assert keyword_hit["seen"] is True and "text" not in keyword_hit
+    assert CHUNKS[101].text in pairs[5]["output"]
+
+    # A search on turn 1 only references the fetched chunk.
+    turn_1_output = client.calls[1]["input"][-2]["output"]
+    assert json.loads(turn_1_output)[0]["hits"][0]["seen"] is True
+
+
 async def test_not_found_allowed_on_turn_1_after_pre_retrieval(fake_env):
     fake_env([not_found("No goldfish.")], pre_retrieve=True)
     evs = await collect("What was Einstein's goldfish called?")

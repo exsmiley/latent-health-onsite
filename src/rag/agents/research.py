@@ -252,6 +252,16 @@ class ResearchAgent:
                     "call_pre_fetch", "fetch", registry.summarize("fetch", output)
                 )
 
+        # Search hits normally carry full text (see registry.present); here the tuned fetch
+        # above supplies it, so the searches show blurbs only and the fetched chunks count as
+        # shown for later turns.
+        searches = len(outputs) - (1 if calls[-1][0] == "call_pre_fetch" else 0)
+        outputs[:searches] = registry.present(
+            [(name, out) for (_, name, _), out in zip(calls, outputs[:searches])],
+            set(),
+            full_text=0,
+        )
+        self.shown.update(ids)
         for (call_id, name, args), output in zip(calls, outputs):
             self.items.append(
                 {
