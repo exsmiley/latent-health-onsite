@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from rag.agents import events, model
+from rag.agents import events, model, pre_retrieval
 from rag.agents.events import Event
 from rag.tools import fetch as fetch_tool
 from rag.tools import registry
@@ -109,6 +109,15 @@ missing. "" for "answered".
 You can reply with your answer after any turn, as soon as you're ready. While you still want \
 to research, call tools instead; a reply without tool calls always ends your research.
 
+## Starting evidence
+Before your first turn, the system usually searches the index for the question itself: the \
+first tool calls after the question (semantic_search on the question, keyword_search on its \
+names and numbers, and a fetch of the top hits' full text) were run for you and cost no turn. \
+Read those chunks first. If they already state the answer, reply with it on your first turn. \
+Otherwise use them to plan: the fetched chunks often settle the first step of a multi-step \
+question, so search for the next step, and fetch other promising hits, right away. Don't \
+repeat those searches.
+
 ## How to work
 1. Plan first. Break the question into the facts you need. For multi-part or comparison \
 questions, cover each part.
@@ -190,6 +199,66 @@ class ResearchAgent:
             if role in ("user", "assistant") and isinstance(content, str) and content:
                 self.items.append({"role": role, "content": content})
         self.items.append({"role": "user", "content": self.question})
+
+    async def pre_retrieve(self, max_turns: int) -> AsyncIterator[Event]:
+        """Search the index for the question before turn 1, without a model call.
+
+        Runs semantic_search on the question (with the previous exchange, for follow-ups) and
+        keyword_search on its names and numbers, then fetches the top hits in full. The calls
+        go into the conversation as ordinary function_call/function_call_output pairs, so
+        turn 1 starts as if the model had already searched and read. This is not a turn: its
+        events carry turn 0.
+        """
+        yield events.status("research", 0, max_turns, "Searching the index for the question")
+        text = pre_retrieval.retrieval_text(self.question, self.history)
+        keywords = pre_retrieval.keyword_query(self.question) or pre_retrieval.keyword_query(text)
+        calls = [
+            (
+                "call_pre_semantic",
+                "semantic_search",
+                {"queries": [text], "top_k": pre_retrieval.SEMANTIC_TOP_K},
+            )
+        ]
+        if keywords:
+            calls.append(
+                (
+                    "call_pre_keyword",
+                    "keyword_search",
+                    {"queries": [keywords], "top_k": pre_retrieval.KEYWORD_TOP_K},
+                )
+            )
+        for call_id, name, args in calls:
+            yield events.tool_call(call_id, name, args, 0)
+        outputs = list(await asyncio.gather(*(registry.dispatch(n, a) for _, n, a in calls)))
+        for (call_id, name, _), output in zip(calls, outputs):
+            yield events.tool_result(call_id, name, registry.summarize(name, output))
+        self.searched = any(pre_retrieval.succeeded(o) for o in outputs)
+
+        ids = pre_retrieval.full_text_ids(*outputs)
+        if ids:
+            output = await registry.dispatch("fetch", {"chunk_ids": ids, "article_ids": []})
+            ids, output = pre_retrieval.drop_long_chunks(output)
+            if ids:
+                args = {"chunk_ids": ids, "article_ids": []}
+                calls.append(("call_pre_fetch", "fetch", args))
+                outputs.append(output)
+                yield events.tool_call("call_pre_fetch", "fetch", args, 0)
+                yield events.tool_result(
+                    "call_pre_fetch", "fetch", registry.summarize("fetch", output)
+                )
+
+        for (call_id, name, args), output in zip(calls, outputs):
+            self.items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": json.dumps(args),
+                }
+            )
+            self.items.append(
+                {"type": "function_call_output", "call_id": call_id, "output": output}
+            )
 
     def add_feedback(self, text: str) -> None:
         """Add a message (e.g. evaluator feedback) for the model to see on its next turn."""

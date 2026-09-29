@@ -15,7 +15,9 @@ const STAGES: { key: Stage; label: string }[] = [
   { key: "respond", label: "Respond" },
 ];
 
-const turnOf = (turn: number, max: number | null) => (max != null ? `Turn ${turn} / ${max}` : `Turn ${turn}`);
+// Turn 0 is the harness's pre-retrieval before the first research turn; it isn't a turn.
+const turnOf = (turn: number, max: number | null) =>
+  turn === 0 ? "Pre-retrieval" : max != null ? `Turn ${turn} / ${max}` : `Turn ${turn}`;
 
 export function Trace({ state }: { state: AssistantState }) {
   const running = state.phase === "running";
