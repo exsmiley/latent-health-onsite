@@ -12,9 +12,11 @@ from rag.tools.models import QueryResults, SearchHit
 # (chunks_embedding_hnsw_idx, vector_cosine_ops); the join to articles happens on the <= k rows.
 # HNSW never indexes NULL vectors; the IS NOT NULL filter is kept for the seq-scan fallback.
 _SQL = """
-SELECT n.id AS chunk_id, n.article_id, a.title, n.section, n.text, 1 - n.distance AS score
+SELECT n.id AS chunk_id, n.article_id, a.title, n.section, n.text, n.token_count,
+       1 - n.distance AS score
 FROM (
-    SELECT c.id, c.article_id, c.section, c.text, c.embedding <=> %(v)s AS distance
+    SELECT c.id, c.article_id, c.section, c.text, c.token_count,
+           c.embedding <=> %(v)s AS distance
     FROM chunks c
     WHERE c.embedding IS NOT NULL
     ORDER BY c.embedding <=> %(v)s
@@ -43,6 +45,8 @@ async def _search_one(query: str, vector: list[float], top_k: int) -> QueryResul
             section=r["section"],
             score=round(float(r["score"]), 4),
             blurb=make_blurb(r["text"]),
+            text=r["text"],
+            token_count=r["token_count"],
         )
         for r in rows
     ]

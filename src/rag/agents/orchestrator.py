@@ -32,18 +32,24 @@ def _citation_items(submission: Submission) -> list[dict]:
 async def run(question: str, history: list[dict] | None = None) -> AsyncIterator[Event]:
     """Run the whole pipeline for one question, yielding the SSE-contract events.
 
-    One budget of `settings.research_max_turns` research turns. The agent may answer after any
+    Unless `settings.research_pre_retrieve` is off, the harness first searches for the
+    question itself (turn 0, not a research turn). Then one budget of `settings.research_max_turns` research turns. The agent may answer after any
     turn; an answer the evaluator rejects sends its feedback back into the same conversation
     and research continues with the turns left. Always ends with `done`. Any exception
     becomes an `error` event first.
     """
     history = history or []
-    max_turns = get_settings().research_max_turns
+    settings = get_settings()
+    max_turns = settings.research_max_turns
     try:
         agent = ResearchAgent(question=question, history=history)
         result: OutcomeResult = "out_of_turns"
         final: Submission | None = None
         final_eval: Evaluation | None = None
+
+        if settings.research_pre_retrieve:
+            async for ev in agent.pre_retrieve(max_turns):
+                yield ev
 
         for turn in range(1, max_turns + 1):
             async for ev in agent.run_turn(turn, max_turns):

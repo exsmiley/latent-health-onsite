@@ -10,9 +10,9 @@ from fakes import install
 
 @pytest.fixture
 def fake_env(monkeypatch):
-    """Returns install(script, tools=None) -> (client, tools)."""
+    """Returns install(script, tools=None, pre_retrieve=False) -> (client, tools)."""
 
-    def _install(script, tools=None):
-        return install(monkeypatch, script, tools)
+    def _install(script, tools=None, pre_retrieve=False):
+        return install(monkeypatch, script, tools, pre_retrieve)
 
     return _install

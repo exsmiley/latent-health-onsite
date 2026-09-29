@@ -10,7 +10,7 @@ from rag.tools.models import QueryResults, SearchHit
 # Postgres' "doesn't contain lexemes" NOTICE path). `tsv @@ q` uses the GIN index chunks_tsv_idx.
 _SQL = """
 WITH q AS (SELECT websearch_to_tsquery('english', %(q)s) AS q)
-SELECT c.id AS chunk_id, c.article_id, a.title, c.section, c.text,
+SELECT c.id AS chunk_id, c.article_id, a.title, c.section, c.text, c.token_count,
        ts_rank_cd(c.tsv, q.q) AS score
 FROM q
 JOIN chunks c ON c.tsv @@ q.q
@@ -33,6 +33,8 @@ async def _search_one(query: str, top_k: int) -> QueryResults:
             section=r["section"],
             score=round(float(r["score"]), 4),
             blurb=make_blurb(r["text"]),
+            text=r["text"],
+            token_count=r["token_count"],
         )
         for r in rows
     ]

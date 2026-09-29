@@ -1,8 +1,9 @@
 """Evaluator: checks whether the cited chunk texts alone support the research answer.
 
 It makes one non-streaming call with a strict JSON-schema output. The input is ONLY the
-question, the cited chunk texts (numbered, with title/section) and, after a clear separator,
-the research answer.
+question, the cited chunk texts (numbered, each under a `title > section` heading, the same
+prefix as `embed_text`, so a chunk that says "He ..." is still self-identifying) and, after a
+clear separator, the research answer.
 """
 
 from typing import Literal
@@ -19,6 +20,12 @@ PASSAGES, and (after a separator) a CANDIDATE ANSWER written by a research agent
 The source passages are your ONLY evidence. Don't use outside knowledge, even if you are sure \
 of a fact. If something isn't stated in (or directly implied by) the passages, treat it as \
 unknown.
+
+Each passage starts with a heading, "Article title > Section" (or just the title for an \
+article's opening passage), naming the Wikipedia article it comes from. The heading tells you \
+what the passage is about: in the article "Albert Einstein", "He was born in 1879" means \
+Einstein was born in 1879. Use headings only to resolve who or what a passage is about. \
+They are not evidence for anything else: a fact must still be stated in a passage's text.
 
 Work in this order:
 1. independent_answer: answer the question yourself using ONLY the source passages, as if the \
@@ -37,7 +44,7 @@ sources, or can't be determined) is ALWAYS "unsupported", even when the passages
 answer the question. The research agent must keep looking.
 3. feedback: for "unsupported", say exactly what's missing, unbacked or contradicted, so the \
 research agent knows what evidence to find or what to remove (e.g. "No passage states the year \
-X happened"; "Passage [2] says Y, not Z"; "Passages never name who 'he' refers to"). For a \
+X happened"; "Passage [2] says Y, not Z"; "No passage links person X to place Y"). For a \
 "not found" answer, suggest different search angles (other wordings, related articles, exact \
 names for keyword search). For "supported", briefly confirm which passages back the key \
 claims.

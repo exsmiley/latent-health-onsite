@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from rag.agents import events, model
+from rag.agents import events, model, pre_retrieval
 from rag.agents.events import Event
 from rag.tools import fetch as fetch_tool
 from rag.tools import registry
@@ -82,12 +82,15 @@ chunk_id, its article_id, the article title and the section heading (if any).
 Pass SEVERAL queries in one call (different phrasings, sub-questions, likely article titles).
 - `keyword_search(queries)`: Postgres full-text search. Good for exact names, rare terms, \
 numbers, dates and quoted phrases. Use it alongside semantic search, not instead of it.
-- Search hits only show a short blurb (the first ~40 words of the chunk). A blurb is NOT enough \
-to cite. Read the chunk first.
-- `fetch(chunk_ids, article_ids)`: reads full text. PREFER fetching specific chunks (several in \
-one call) over whole articles. Fetch a whole article only when you need to scan it to find \
-the right passage. It returns the article's chunk_ids, so you can then fetch or cite the \
-exact chunks.
+- Search hits come in three forms. The top few new hits of each query include `text`: the \
+chunk's FULL text, which you can read and cite directly. Lower-ranked hits only show a `blurb` \
+(the first ~40 words). A blurb is NOT enough to cite: fetch the chunk first. A hit with \
+`"seen": true` was already shown to you (above in the same turn, or in full in an earlier \
+turn), so its text isn't repeated; look it up there.
+- `fetch(chunk_ids, article_ids)`: reads full text. Use it for blurb-only hits and for chunks \
+you haven't seen. PREFER fetching specific chunks (several in one call) over whole articles. \
+Fetch a whole article only when you need to scan it to find the right passage. It returns the \
+article's chunk_ids, so you can then fetch or cite the exact chunks.
 - Each search call takes at most 5 queries. Semantic scores (cosine similarity) and keyword \
 scores (ts_rank_cd) are on different scales, so don't compare them with each other. Rank hits \
 within one tool's results only, and judge relevance by reading.
@@ -109,13 +112,34 @@ missing. "" for "answered".
 You can reply with your answer after any turn, as soon as you're ready. While you still want \
 to research, call tools instead; a reply without tool calls always ends your research.
 
+## Starting evidence
+Before your first turn, the system usually searches the index for the question itself: the \
+first tool calls after the question (semantic_search on the question, keyword_search on its \
+names and numbers, and a fetch of the top hits' full text) were run for you and cost no turn. \
+Read those chunks first. If they already state the answer, reply with it on your first turn. \
+Otherwise use them to plan: the fetched chunks often settle the first step of a multi-step \
+question, so search for the next step, and fetch other promising hits, right away. Don't \
+repeat those searches.
+
+These chunks were picked because they resemble the question, not because they answer it, so \
+check before answering on your first turn:
+- Walk the chain. Write out every step the question needs (e.g. "the teacher of the teacher of \
+Alexander's tutor": tutor → the tutor's teacher → THAT person's teacher) and confirm each step \
+is stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
+- Cover every part. For lists and comparisons, make sure you have each item or each side, not \
+just the ones that happened to come up.
+- Take facts about a subject from its own article. If a number or date about X comes from \
+another article (e.g. a mountain's height in a general "Mountain" article), check X's own \
+article and use that, since articles sometimes disagree.
+
 ## How to work
 1. Plan first. Break the question into the facts you need. For multi-part or comparison \
 questions, cover each part.
 2. Search in parallel. In a single turn, call semantic_search and keyword_search together, each \
 with several queries. You can call several tools in the same turn and they run concurrently. \
 Turns are the scarce resource, not tool calls.
-3. Read early. As soon as a blurb looks relevant, fetch it (and other promising chunks) in \
+3. Read the hits. If full-text hits already state the answer, answer right away and cite \
+them; there is no need to fetch them again. Otherwise fetch the promising blurb-only chunks in \
 the next turn, together with any follow-up searches. Don't re-run searches just to confirm a \
 blurb. Reading the chunk is the confirmation. Follow up with targeted searches only if \
 something is missing or the sources conflict.
@@ -138,9 +162,14 @@ your searches, other chunks, whole articles, or your reasoning. If a fact is not
 chunk's text, then as far as the evaluator knows it is unsupported.
 - Cite the MINIMAL set of chunks that TOGETHER fully support the answer: every claim covered, \
 no padding. Usually 1 to 4 chunks. Drop chunks that add nothing.
-- Chunks don't carry context from neighbouring chunks. If a chunk says "He was born in 1879" \
-without naming the person, also cite a chunk that establishes who "he" is, or pick a better \
-chunk.
+- The evaluator sees each cited chunk under its "title > section" heading (the same title and \
+section that fetch shows), so a chunk from the article "Albert Einstein" that says "He was \
+born in 1879" is enough to show when Einstein was born. Chunks don't carry any other context \
+from neighbouring chunks.
+- For multi-step questions, cite a chunk for EVERY link in the chain, not just the last fact. \
+E.g. for "On which river is the birthplace of the 1921 physics Nobel winner?", cite the chunk \
+saying Einstein won the 1921 prize, the one saying he was born in Ulm, and the one saying Ulm \
+is on the Danube.
 - Only put in the answer what the cited text supports.
 
 ## Turn budget
@@ -182,6 +211,7 @@ class ResearchAgent:
     submission: Submission | None = None
     not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
+    shown: set[int] = field(default_factory=set)  # chunk ids whose full text the model has seen
     turns_used: int = 0
 
     def __post_init__(self) -> None:
@@ -190,6 +220,76 @@ class ResearchAgent:
             if role in ("user", "assistant") and isinstance(content, str) and content:
                 self.items.append({"role": role, "content": content})
         self.items.append({"role": "user", "content": self.question})
+
+    async def pre_retrieve(self, max_turns: int) -> AsyncIterator[Event]:
+        """Search the index for the question before turn 1, without a model call.
+
+        Runs semantic_search on the question (with the previous exchange, for follow-ups) and
+        keyword_search on its names and numbers, then fetches the top hits in full. The calls
+        go into the conversation as ordinary function_call/function_call_output pairs, so
+        turn 1 starts as if the model had already searched and read. This is not a turn: its
+        events carry turn 0.
+        """
+        yield events.status("research", 0, max_turns, "Searching the index for the question")
+        text = pre_retrieval.retrieval_text(self.question, self.history)
+        keywords = pre_retrieval.keyword_query(self.question) or pre_retrieval.keyword_query(text)
+        calls = [
+            (
+                "call_pre_semantic",
+                "semantic_search",
+                {"queries": [text], "top_k": pre_retrieval.SEMANTIC_TOP_K},
+            )
+        ]
+        if keywords:
+            calls.append(
+                (
+                    "call_pre_keyword",
+                    "keyword_search",
+                    {"queries": [keywords], "top_k": pre_retrieval.KEYWORD_TOP_K},
+                )
+            )
+        for call_id, name, args in calls:
+            yield events.tool_call(call_id, name, args, 0)
+        outputs = list(await asyncio.gather(*(registry.dispatch(n, a) for _, n, a in calls)))
+        for (call_id, name, _), output in zip(calls, outputs):
+            yield events.tool_result(call_id, name, registry.summarize(name, output))
+        self.searched = any(pre_retrieval.succeeded(o) for o in outputs)
+
+        ids = pre_retrieval.full_text_ids(*outputs)
+        if ids:
+            output = await registry.dispatch("fetch", {"chunk_ids": ids, "article_ids": []})
+            ids, output = pre_retrieval.drop_long_chunks(output)
+            if ids:
+                args = {"chunk_ids": ids, "article_ids": []}
+                calls.append(("call_pre_fetch", "fetch", args))
+                outputs.append(output)
+                yield events.tool_call("call_pre_fetch", "fetch", args, 0)
+                yield events.tool_result(
+                    "call_pre_fetch", "fetch", registry.summarize("fetch", output)
+                )
+
+        # Search hits normally carry full text (see registry.present); here the tuned fetch
+        # above supplies it, so the searches show blurbs only and the fetched chunks count as
+        # shown for later turns.
+        searches = len(outputs) - (1 if calls[-1][0] == "call_pre_fetch" else 0)
+        outputs[:searches] = registry.present(
+            [(name, out) for (_, name, _), out in zip(calls, outputs[:searches])],
+            set(),
+            full_text=0,
+        )
+        self.shown.update(ids)
+        for (call_id, name, args), output in zip(calls, outputs):
+            self.items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": json.dumps(args),
+                }
+            )
+            self.items.append(
+                {"type": "function_call_output", "call_id": call_id, "output": output}
+            )
 
     def add_feedback(self, text: str) -> None:
         """Add a message (e.g. evaluator feedback) for the model to see on its next turn."""
@@ -301,11 +401,15 @@ class ResearchAgent:
                 task.cancel()
 
         # Every function call must get an output (in call order) so the conversation stays
-        # valid for later turns.
-        for (call, _, _), outcome in zip(parsed, outcomes):
-            assert outcome is not None
+        # valid for later turns. Search hits are trimmed across the whole turn (full text for
+        # the top hits, no repeats), so that happens once every call has finished.
+        outputs = registry.present(
+            [(call.name, outcome.output) for (call, _, _), outcome in zip(parsed, outcomes)],
+            self.shown,
+        )
+        for (call, _, _), output in zip(parsed, outputs):
             self.items.append(
-                {"type": "function_call_output", "call_id": call.call_id, "output": outcome.output}
+                {"type": "function_call_output", "call_id": call.call_id, "output": output}
             )
 
     async def _execute(self, call: Any, args: dict | None, parse_error: str | None) -> _CallOutcome:
