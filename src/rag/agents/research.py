@@ -1,12 +1,12 @@
-"""Research agent: searches the corpus with tools and submits an answer with chunk citations.
+"""Research agent: searches the corpus with tools and answers with chunk citations.
 
-A *turn* is one model call. All function calls from one turn run concurrently. A *round* is at
-most `settings.research_max_turns` turns and ends when a valid `submit_answer` arrives or the
-budget runs out. The agent can instead end the round with `report_not_found` when the index
-doesn't contain the answer; the orchestrator then replies "not found" without further rounds.
-On the last turn of a round the model must call one of those two tools. On a retry round the
-conversation continues, with the evaluator's feedback added as a user message and a fresh turn
-budget.
+A *turn* is one research model call; the orchestrator gives each question a single budget of
+`settings.research_max_turns` turns. The model always has `tool_choice="auto"`. A response
+with any function call is a tool turn: the calls run concurrently and their outputs go back to
+the model (any message text in that response, e.g. a commentary preamble, is ignored). A
+response with no function call is the agent's final answer, a JSON object matching
+`ANSWER_SCHEMA` (set via `text.format`). The orchestrator evaluates "answered" answers and, if
+the evaluator rejects one, adds its feedback to the same conversation and keeps going.
 """
 
 import asyncio
@@ -17,69 +17,56 @@ from typing import Any
 
 from rag.agents import events, model
 from rag.agents.events import Event
-from rag.config import get_settings
+from rag.tools import fetch as fetch_tool
+from rag.tools import registry
 from rag.tools.models import Chunk
 
-SUBMIT_ANSWER = "submit_answer"
-REPORT_NOT_FOUND = "report_not_found"
 SEARCH_TOOLS = {"semantic_search", "keyword_search"}
 
-SUBMIT_ANSWER_SPEC: dict = {
-    "type": "function",
-    "name": SUBMIT_ANSWER,
-    "description": (
-        "Submit your final answer and the chunk ids that support it. This ends the research "
-        "round. An independent evaluator will then read ONLY the text of the cited chunks and "
-        "check that it supports your answer. Citations must be chunk ids (never article ids)."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "answer": {
-                "type": "string",
-                "description": "A complete, direct answer to the user's question.",
-            },
-            "citations": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "description": (
-                    "The minimal set of chunk ids whose text, read on its own, fully supports "
-                    "every claim in the answer."
-                ),
-            },
+ANSWER_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["answered", "not_found"],
+            "description": '"answered" if your cited chunks state the answer, else "not_found".',
         },
-        "required": ["answer", "citations"],
-        "additionalProperties": False,
+        "answer": {
+            "type": "string",
+            "description": 'A complete, direct answer to the question ("" for not_found).',
+        },
+        "citations": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "The minimal set of chunk ids whose text, read on its own, fully supports every "
+                "claim in the answer ([] for not_found)."
+            ),
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                'For not_found: what you searched for and what was missing. "" when answered.'
+            ),
+        },
     },
-    "strict": True,
+    "required": ["status", "answer", "citations", "reason"],
+    "additionalProperties": False,
 }
 
-REPORT_NOT_FOUND_SPEC: dict = {
-    "type": "function",
-    "name": REPORT_NOT_FOUND,
-    "description": (
-        "Declare that the index does not contain the answer. This ends the research and the "
-        "user is told the answer could not be found. Use it as soon as focused searching turns "
-        "up nothing relevant, instead of guessing or searching for guessed answers."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "reason": {
-                "type": "string",
-                "description": "One or two sentences: what you searched for and what was missing.",
-            },
-        },
-        "required": ["reason"],
-        "additionalProperties": False,
-    },
-    "strict": True,
+ANSWER_FORMAT: dict = {
+    "format": {
+        "type": "json_schema",
+        "name": "research_answer",
+        "schema": ANSWER_SCHEMA,
+        "strict": True,
+    }
 }
 
 SYSTEM_PROMPT = """\
 You are a meticulous research agent answering questions from a search index over Simple English \
 Wikipedia (a snapshot from March 2022). You answer by finding evidence, not by memory. Every \
-claim you submit must be backed by text you have actually read in the index.
+claim in your answer must be backed by text you have actually read in the index.
 
 ## The corpus and tools
 - Articles are split into chunks of about 350 tokens made of whole paragraphs. Each chunk has a \
@@ -94,14 +81,23 @@ to cite. Read the chunk first.
 one call) over whole articles. Fetch a whole article only when you need to scan it to find \
 the right passage. It returns the article's chunk_ids, so you can then fetch or cite the \
 exact chunks.
-- `submit_answer(answer, citations)`: ends the round.
-- `report_not_found(reason)`: ends the research when the index doesn't have the answer.
 - Each search call takes at most 5 queries. Semantic scores (cosine similarity) and keyword \
 scores (ts_rank_cd) are on different scales, so don't compare them with each other. Rank hits \
 within one tool's results only, and judge relevance by reading.
 - If a tool output is `{"error": ...}`, it's a recoverable mistake (bad arguments, too many \
 queries, unknown ids, a temporary failure). Read the message, fix the call and retry, \
 preferably in the same turn as other useful calls. Don't give up because of an error.
+
+## How to answer
+You finish by replying WITHOUT calling any tool. That reply is your final answer and must be \
+a JSON object with exactly these fields:
+- `status`: "answered" or "not_found".
+- `answer`: for "answered", a complete, direct answer to the question. "" for "not_found".
+- `citations`: for "answered", the chunk ids that support the answer. [] for "not_found".
+- `reason`: for "not_found", one or two sentences on what you searched for and what was \
+missing. "" for "answered".
+You can reply with your answer after any turn, as soon as you're ready. While you still want \
+to research, call tools instead; a reply without tool calls always ends your research.
 
 ## How to work
 1. Plan first. Break the question into the facts you need. For multi-part or comparison \
@@ -113,16 +109,17 @@ Turns are the scarce resource, not tool calls.
 the next turn, together with any follow-up searches. Don't re-run searches just to confirm a \
 blurb. Reading the chunk is the confirmation. Follow up with targeted searches only if \
 something is missing or the sources conflict.
-4. Submit as soon as the evidence is sufficient. Don't spend turns you don't need.
+4. Answer as soon as the evidence is sufficient. Don't spend turns you don't need.
 5. Give up quickly when it isn't there. If about two turns of focused searching (semantic and \
 keyword, a few phrasings, plus reading the most relevant chunks, e.g. the subject's own \
-article) find nothing that answers the question, call report_not_found. Don't keep rephrasing \
-the same search, and never search for guessed answers (e.g. candidate names).
+article) find nothing that answers the question, reply with status "not_found". Don't keep \
+rephrasing the same search, and never search for guessed answers (e.g. candidate names).
 
 ## Never guess
-Never submit an answer that the chunks you have read don't state. A made-up or inferred answer \
-will be rejected and wastes the user's time. "Not found" is always better than a guess. Never \
-put "not found" or "the sources don't say" in submit_answer; use report_not_found.
+Never answer with anything that the chunks you have read don't state. A made-up or inferred \
+answer will be rejected and wastes the user's time. "not_found" is always better than a guess. \
+Never write "not found" or "the sources don't say" as an "answered" answer; use status \
+"not_found". You can only reply "not_found" after you have searched.
 
 ## Citations (read carefully)
 - Citations MUST be chunk ids. Article ids are rejected.
@@ -137,14 +134,15 @@ chunk.
 - Only put in the answer what the cited text supports.
 
 ## Turn budget
-Each round gives you a fixed number of turns (model calls). Before each turn you are told how \
-many remain. On the final turn you must call submit_answer or report_not_found, so make sure \
-you have fetched and read your evidence before then. An invalid submission (e.g. unknown or non-chunk ids) is \
-returned to you as an error and costs a turn.
+You have a fixed number of turns (model calls) for this question. Before each turn you are \
+told how many remain. An invalid answer (bad JSON, missing, unknown or non-chunk citations) is \
+returned to you as an error and costs a turn. If you run out of turns, the user is told the \
+answer couldn't be found.
 
-If the evaluator rejects an answer, you'll get its feedback and a fresh turn budget. Fix \
-exactly what it points out: find the missing evidence, cite the right chunks, or narrow the \
-answer to what the sources support. If the evidence isn't there, call report_not_found.
+If the evaluator rejects an answer, you'll get its feedback and can keep researching with the \
+turns you have left. Fix exactly what it points out: find the missing evidence, cite the right \
+chunks, or narrow the answer to what the sources support. If the evidence isn't there, reply \
+"not_found".
 
 The conversation may include earlier user/assistant exchanges. Use them to resolve \
 follow-up questions (pronouns, "what about...", etc.), but still ground this answer in fresh \
@@ -162,8 +160,6 @@ class Submission:
 class _CallOutcome:
     output: str
     summary: str
-    submission: Submission | None = None
-    not_found: str | None = None  # the reason, when report_not_found was accepted
 
 
 @dataclass
@@ -171,10 +167,11 @@ class ResearchAgent:
     question: str
     history: list[dict] = field(default_factory=list)
     items: list[dict] = field(default_factory=list)
+    # Set by `run_turn` when this turn's reply was an accepted final answer.
     submission: Submission | None = None
-    not_found: str | None = None  # reason given by an accepted report_not_found
-    last_error: str | None = None
+    not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
+    turns_used: int = 0
 
     def __post_init__(self) -> None:
         for msg in self.history:
@@ -183,71 +180,80 @@ class ResearchAgent:
                 self.items.append({"role": role, "content": content})
         self.items.append({"role": "user", "content": self.question})
 
-    def tools(self) -> list[dict]:
-        from rag.tools import registry
+    def add_feedback(self, text: str) -> None:
+        """Add a message (e.g. evaluator feedback) for the model to see on its next turn."""
+        self.items.append({"role": "user", "content": text})
 
-        return [*registry.TOOL_SPECS, SUBMIT_ANSWER_SPEC, REPORT_NOT_FOUND_SPEC]
+    async def run_turn(self, turn: int, max_turns: int) -> AsyncIterator[Event]:
+        """Run one research turn, yielding status/tool_call/tool_result/research_answer events.
 
-    async def run_round(self, round_no: int, feedback: str | None = None) -> AsyncIterator[Event]:
-        """Run one research round, yielding status/tool_call/tool_result events.
-
-        Afterwards `self.submission` holds the accepted submission, `self.not_found` holds the
-        reason if the agent reported the answer isn't in the index, or both are None if the
-        budget ran out (then `self.last_error` explains why).
+        Afterwards `self.submission` holds an accepted "answered" reply, `self.not_found` the
+        reason of an accepted "not_found" reply, or both are None (a tool turn, or an invalid
+        answer that was fed back to the model).
         """
-        settings = get_settings()
-        max_turns = settings.research_max_turns
         self.submission = None
         self.not_found = None
-        self.last_error = None
-        if feedback:
-            self.items.append({"role": "user", "content": feedback})
+        yield events.status("research", turn, max_turns, f"Researching (turn {turn}/{max_turns})")
+        self.items.append({"role": "developer", "content": _budget_note(turn, max_turns)})
+        response = await model.create(
+            instructions=SYSTEM_PROMPT,
+            input=self.items,
+            tools=registry.TOOL_SPECS,
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            text=ANSWER_FORMAT,
+        )
+        self.turns_used += 1
+        self.items.extend(model.dump_output_item(o) for o in response.output)
+        calls = [o for o in response.output if getattr(o, "type", None) == "function_call"]
 
-        tools = self.tools()
-        for turn in range(1, max_turns + 1):
-            remaining = max_turns - turn + 1
-            last = turn == max_turns
-            yield events.status(
-                "research",
-                round_no,
-                turn,
-                f"Researching (round {round_no}, turn {turn}/{max_turns})",
-            )
-            self.items.append({"role": "developer", "content": _budget_note(turn, max_turns)})
-            response = await model.create(
-                instructions=SYSTEM_PROMPT,
-                input=self.items,
-                tools=tools,
-                tool_choice=FINAL_TOOL_CHOICE if last else "auto",
-                parallel_tool_calls=True,
-            )
-            self.items.extend(model.dump_output_item(o) for o in response.output)
-            calls = [o for o in response.output if getattr(o, "type", None) == "function_call"]
-
-            if not calls:
-                self.last_error = "The model replied without calling a tool."
-                if not last:
-                    self.items.append(
-                        {
-                            "role": "developer",
-                            "content": (
-                                "You replied without calling a tool. Keep researching with the "
-                                "tools, or call submit_answer with chunk citations. "
-                                f"{remaining - 1} turn(s) left."
-                            ),
-                        }
-                    )
-                continue
-
-            async for ev in self._run_calls(calls, round_no, turn):
+        if calls:
+            # A tool turn. Any message text alongside the calls is commentary and is ignored.
+            async for ev in self._run_calls(calls, turn, run=turn < max_turns):
                 yield ev
-            if self.submission is not None or self.not_found is not None:
+            return
+
+        async for ev in self._handle_answer(final_text(response), turn, max_turns):
+            yield ev
+
+    async def _handle_answer(self, raw: str, turn: int, max_turns: int) -> AsyncIterator[Event]:
+        data, error = _parse_answer(raw)
+        answer = str(data.get("answer") or "").strip() if data else ""
+        cited = data.get("citations") if data else None
+        citations = [c for c in cited if _is_int(c)] if isinstance(cited, list) else []
+
+        if error is None and data["status"] == "not_found":
+            if self.searched:
+                reason = str(data.get("reason") or "").strip() or "(no reason given)"
+                self.not_found = reason
+                yield events.research_answer(turn, "not_found", "", [], reason)
+                return
+            error = (
+                'You replied "not_found" without searching. Search the index '
+                "(semantic_search and keyword_search) first."
+            )
+        elif error is None:
+            submission, error = await validate_submission(data)
+            if submission is not None:
+                self.submission = submission
+                yield events.research_answer(
+                    turn, "answered", submission.answer, submission.citations, ""
+                )
                 return
 
-        if self.last_error is None:
-            self.last_error = f"No valid answer was submitted within {max_turns} turns."
+        yield events.research_answer(turn, "invalid", answer, citations, error)
+        left = max_turns - turn
+        self.items.append(
+            {
+                "role": "developer",
+                "content": (
+                    f"Your answer was rejected: {error} {_turns_left(left)} Fix it and reply "
+                    "again, or keep researching with the tools."
+                ),
+            }
+        )
 
-    async def _run_calls(self, calls: list[Any], round_no: int, turn: int) -> AsyncIterator[Event]:
+    async def _run_calls(self, calls: list[Any], turn: int, run: bool) -> AsyncIterator[Event]:
         parsed: list[tuple[Any, dict | None, str | None]] = []
         for call in calls:
             args, err = _parse_args(call.arguments)
@@ -256,9 +262,14 @@ class ResearchAgent:
                 call.call_id,
                 call.name,
                 args if args is not None else {"_raw": call.arguments},
-                round_no,
                 turn,
             )
+
+        if not run:
+            # Last turn: the model can't use the results, so don't spend time running them.
+            for call, _, _ in parsed:
+                yield events.tool_result(call.call_id, call.name, "not run: no turns left")
+            return
 
         tasks = {
             asyncio.ensure_future(self._execute(call, args, err)): i
@@ -279,37 +290,16 @@ class ResearchAgent:
                 task.cancel()
 
         # Every function call must get an output (in call order) so the conversation stays
-        # valid for later turns and retry rounds.
-        accepted: Submission | None = None
-        not_found: str | None = None
+        # valid for later turns.
         for (call, _, _), outcome in zip(parsed, outcomes):
             assert outcome is not None
-            output = outcome.output
-            if outcome.submission is not None:
-                if accepted is None:
-                    accepted = outcome.submission
-                else:
-                    output = "Ignored: an earlier submit_answer call in this turn was accepted."
-            elif outcome.not_found is not None and not_found is None:
-                not_found = outcome.not_found
             self.items.append(
-                {"type": "function_call_output", "call_id": call.call_id, "output": output}
+                {"type": "function_call_output", "call_id": call.call_id, "output": outcome.output}
             )
-        # A real answer wins over a not-found report made in the same turn.
-        if accepted is not None:
-            self.submission = accepted
-        elif not_found is not None:
-            self.not_found = not_found
 
     async def _execute(self, call: Any, args: dict | None, parse_error: str | None) -> _CallOutcome:
         if parse_error is not None:
             return _CallOutcome(_error_json(parse_error), "error: invalid arguments")
-        if call.name == SUBMIT_ANSWER:
-            return await self._submit(args)
-        if call.name == REPORT_NOT_FOUND:
-            return self._report_not_found(args)
-        from rag.tools import registry
-
         known = {spec.get("name") for spec in registry.TOOL_SPECS}
         if call.name not in known:
             return _CallOutcome(_error_json(f"Unknown tool {call.name!r}."), "error: unknown tool")
@@ -321,40 +311,43 @@ class ResearchAgent:
             return _CallOutcome(
                 _error_json(f"{type(exc).__name__}: {exc}"), f"error: {type(exc).__name__}"
             )
-        return _CallOutcome(result, _summarize(call.name, result))
+        return _CallOutcome(result, registry.summarize(call.name, result))
 
-    async def _submit(self, args: dict) -> _CallOutcome:
-        submission, error = await validate_submission(args)
-        if submission is None:
-            self.last_error = f"Invalid submission: {error}"
-            return _CallOutcome(
-                _error_json(f"Submission rejected: {error} Fix it and call submit_answer again."),
-                f"rejected: {error}",
-            )
-        n = len(submission.citations)
-        return _CallOutcome(
-            json.dumps({"ok": True, "message": "Answer submitted for evaluation."}),
-            f"accepted ({n} citation{'s' if n != 1 else ''})",
-            submission,
-        )
 
-    def _report_not_found(self, args: dict) -> _CallOutcome:
-        if not self.searched:
-            self.last_error = "report_not_found before any search"
-            return _CallOutcome(
-                _error_json("Search the index (semantic_search and keyword_search) first."),
-                "rejected: no searches yet",
-            )
-        reason = str(args.get("reason") or "").strip() or "(no reason given)"
-        return _CallOutcome(
-            json.dumps({"ok": True, "message": "Reported as not found."}),
-            "reported not found",
-            not_found=reason,
+def final_text(response: Any) -> str:
+    """The text of a response's final answer: its `final_answer`-phase message if there is
+    one, otherwise its last message. Only used for responses without function calls."""
+    messages = [o for o in response.output if getattr(o, "type", None) == "message"]
+    finals = [m for m in messages if getattr(m, "phase", None) == "final_answer"]
+    message = finals[-1] if finals else (messages[-1] if messages else None)
+    if message is None:
+        return ""
+    parts = []
+    for content in message.content:
+        if getattr(content, "type", None) == "output_text" and content.text:
+            parts.append(content.text)
+        elif getattr(content, "type", None) == "refusal":
+            parts.append(content.refusal)
+    return "".join(parts)
+
+
+def _parse_answer(raw: str) -> tuple[dict | None, str | None]:
+    if not raw.strip():
+        return None, "Your reply was empty. Reply with the JSON answer object."
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, (
+            "Your reply was not valid JSON. A reply without tool calls must be the JSON answer "
+            "object with status, answer, citations and reason."
         )
+    if not isinstance(data, dict) or data.get("status") not in ("answered", "not_found"):
+        return None, 'The answer must be a JSON object whose status is "answered" or "not_found".'
+    return data, None
 
 
 async def validate_submission(args: dict) -> tuple[Submission | None, str | None]:
-    """Check a submit_answer payload. Returns (submission, None) or (None, error message)."""
+    """Check an "answered" reply. Returns (submission, None) or (None, error message)."""
     answer = args.get("answer")
     citations = args.get("citations")
     if not isinstance(answer, str) or not answer.strip():
@@ -363,14 +356,12 @@ async def validate_submission(args: dict) -> tuple[Submission | None, str | None
         return None, "`citations` must be a non-empty list of chunk ids."
     ids: list[int] = []
     for c in citations:
-        if isinstance(c, bool) or not isinstance(c, int):
+        if not _is_int(c):
             return None, f"Citation {c!r} is not an integer chunk id."
         if c not in ids:
             ids.append(c)
 
-    from rag.tools.fetch import fetch
-
-    result = await fetch(chunk_ids=ids, article_ids=[])
+    result = await fetch_tool.fetch(chunk_ids=ids, article_ids=[])
     if result.missing_chunk_ids:
         return None, (
             f"These citations are not valid chunk ids: {sorted(result.missing_chunk_ids)}. "
@@ -384,18 +375,8 @@ async def validate_submission(args: dict) -> tuple[Submission | None, str | None
     return Submission(answer=answer.strip(), citations=ids, chunks=[by_id[i] for i in ids]), None
 
 
-FINAL_TOOL_CHOICE: dict = {
-    "type": "allowed_tools",
-    "mode": "required",
-    "tools": [
-        {"type": "function", "name": SUBMIT_ANSWER},
-        {"type": "function", "name": REPORT_NOT_FOUND},
-    ],
-}
-
-
-def retry_feedback(evaluator_feedback: str, independent_answer: str, max_turns: int) -> str:
-    """The user message that opens a retry round after the evaluator rejects an answer."""
+def retry_feedback(evaluator_feedback: str, independent_answer: str, turns_left: int) -> str:
+    """The message added to the conversation after the evaluator rejects an answer."""
     parts = [
         (
             "The evaluator REJECTED your answer. It only saw the question and the text of the "
@@ -408,36 +389,33 @@ def retry_feedback(evaluator_feedback: str, independent_answer: str, max_turns: 
             f"What the evaluator could conclude from your cited chunks alone: {independent_answer}"
         )
     parts.append(
-        f"You have a fresh budget of {max_turns} turns. Find the missing evidence (or narrow "
-        "the answer to what the sources support), then call submit_answer again with the "
-        "minimal set of chunk ids that fully supports it."
+        f"{_turns_left(turns_left)} Find the missing evidence (or narrow the answer to what the "
+        "sources support), then reply again with the minimal set of chunk ids that fully "
+        'supports it, or reply "not_found" if the index doesn\'t have it.'
     )
     return "\n\n".join(parts)
 
 
-def no_submission_feedback(reason: str, max_turns: int) -> str:
-    return (
-        f"Your previous research round ended without a valid submission ({reason}). You have "
-        f"a fresh budget of {max_turns} turns. Make sure you fetch and read the evidence, then "
-        "call submit_answer with chunk ids (not article ids) before the budget runs out, or "
-        "report_not_found if the index doesn't have the answer."
-    )
+def _turns_left(n: int) -> str:
+    return f"You have {n} turn{'s' if n != 1 else ''} left."
 
 
 def _budget_note(turn: int, max_turns: int) -> str:
     remaining = max_turns - turn + 1
     if remaining == 1:
         return (
-            f"Turn {turn} of {max_turns}. This is your FINAL turn: call submit_answer with an "
-            "answer your chunks state (and their ids), or report_not_found if you don't have one."
+            f"Turn {turn} of {max_turns}. This is your LAST turn. Tool calls made now can't be "
+            "followed up: their results would never reach you. If you don't reply with your "
+            "answer now, the user will be told the answer couldn't be found."
         )
-    note = f"Turn {turn} of {max_turns}: {remaining} turns left in this round, including this one."
+    note = f"Turn {turn} of {max_turns}: {remaining} turns left, including this one."
     if remaining == 2:
-        note += (
-            " Next turn is your last and must be submit_answer or report_not_found, so read what "
-            "you need now."
-        )
+        note += " After this one you get one more turn, and tool calls made then can't be used."
     return note
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _parse_args(raw: str) -> tuple[dict | None, str | None]:
@@ -452,30 +430,3 @@ def _parse_args(raw: str) -> tuple[dict | None, str | None]:
 
 def _error_json(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False)
-
-
-def _summarize(name: str, result: str) -> str:
-    from rag.tools import registry
-
-    summarize = getattr(registry, "summarize", None)
-    if summarize is not None:
-        try:
-            return str(summarize(name, result))
-        except Exception:  # noqa: BLE001, S110 - a summary is cosmetic; fall back below
-            pass
-    return _fallback_summary(result)
-
-
-def _fallback_summary(result: str) -> str:
-    try:
-        data = json.loads(result)
-    except (TypeError, json.JSONDecodeError):
-        return f"{len(result or '')} chars"
-    if isinstance(data, dict) and "error" in data:
-        return f"error: {data['error']}"[:120]
-    if isinstance(data, list):
-        hits = sum(len(q.get("hits", [])) for q in data if isinstance(q, dict))
-        return f"{len(data)} queries, {hits} hits"
-    if isinstance(data, dict) and ("chunks" in data or "articles" in data):
-        return f"{len(data.get('chunks', []))} chunks, {len(data.get('articles', []))} articles"
-    return f"{len(result)} chars"

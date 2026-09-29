@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from rag import db
 from rag.agents import orchestrator
 from rag.agents.events import Event
+from rag.tools import fetch as fetch_tool
 from rag.tools.models import Chunk
 
 log = logging.getLogger(__name__)
@@ -57,9 +58,7 @@ async def health() -> dict:
 
 @app.get("/api/chunks/{chunk_id}", response_model=Chunk)
 async def get_chunk(chunk_id: int) -> Chunk:
-    from rag.tools.fetch import fetch
-
-    result = await fetch(chunk_ids=[chunk_id], article_ids=[])
+    result = await fetch_tool.fetch(chunk_ids=[chunk_id], article_ids=[])
     if not result.chunks:
         raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} not found")
     return result.chunks[0]

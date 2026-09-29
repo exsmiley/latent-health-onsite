@@ -59,37 +59,55 @@ truncated.
 
 ## Agent pipeline
 
+There is a single budget of `settings.research_max_turns` (7) research turns per question; there
+are no rounds. A *turn* is one research-agent model call. Evaluator and responder calls do not
+count as turns.
+
 ```
-question ──► Research agent (≤7 turns) ──submit_answer(answer, chunk_ids)──►
-             Evaluator (sees ONLY question + cited chunk texts loaded from the DB)
-               ├─ supported ──► Responder ──stream──► user
-               └─ not supported ──► back to Research agent with feedback (new 7-turn round)
-                    after max_research_rounds (3): a fixed "couldn't find the answer" reply, no citations
-             report_not_found(reason) at any turn ──► fixed "couldn't find" reply, no evaluation
+for turn in 1..7:
+    research agent model call (tools: semantic_search, keyword_search, fetch; tool_choice auto)
+    ├─ made tool calls ──► run them concurrently, feed results back, next turn
+    └─ no tool calls   ──► its final message is a structured answer (JSON schema below)
+         ├─ invalid (bad JSON, empty/unknown/non-chunk citations) ──► error fed back, next turn
+         ├─ status "not_found" ──► fixed "couldn't find" reply, done (no evaluation)
+         └─ status "answered"  ──► Evaluator (sees ONLY question + cited chunk texts from the DB)
+              ├─ supported   ──► Responder ──stream──► user, done
+              └─ unsupported ──► feedback added to the conversation, next turn
+out of turns ──► fixed "couldn't find" reply
 ```
 
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
-  Tools: `semantic_search`, `keyword_search`, `fetch`, `submit_answer`, `report_not_found`. A
-  *turn* is one model call, which may emit several tool calls; these execute concurrently. On
-  the last turn, `tool_choice` is `allowed_tools` (required) over `submit_answer` and
-  `report_not_found`. The prompt says to give up after about two turns of focused searching
-  that find nothing and never to guess; `report_not_found` is rejected until a search has run. The system prompt must explain that:
-  prefer fetching specific chunks over whole articles; **citations must be chunk ids**; the
-  evaluator will only see cited chunk text and will not accept whole articles; cite the minimal
-  sufficient set of chunks. `submit_answer` args: `{answer: str, citations: list[int]}`. On a
-  retry round, the agent keeps its prior conversation and receives the evaluator's feedback.
-  Invalid or nonexistent citation ids are returned to the agent as a tool error, which costs a
-  turn.
+  Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
+  never forced to answer. It ends research by replying WITHOUT a tool call. That final message
+  must match the strict JSON schema `{status: "answered" | "not_found", answer: str,
+  citations: int[], reason: str}`, set via the Responses API `text.format`. For "answered",
+  `answer` and chunk-id `citations` are required and `reason` is ""; for "not_found", `reason`
+  says what was searched and what was missing, and `answer`/`citations` are empty. It may
+  answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
+  search has run. The system prompt must explain that:
+  - it should prefer fetching specific chunks over whole articles;
+  - **citations must be chunk ids**, and the evaluator sees only the cited chunk text and will
+    not accept whole articles;
+  - it should cite the minimal sufficient set of chunks;
+  - it should never guess, and should answer "not_found" after about two turns of fruitless
+    focused searching;
+  - it should answer as early as the evidence allows.
+  Before each turn a developer note gives the remaining turns. The last one says that tool calls
+  made on that turn can't be followed up, and that running out means the user is told the
+  answer couldn't be found. That is information, not forcing.
+  A response containing any function call is a tool turn, and any commentary message text in it
+  is ignored. Tool calls made on the last turn are not run: each gets a `tool_result` with
+  summary "not run: no turns left".
 - **Evaluator** (`rag.agents.evaluator`). A single model call, with structured JSON output
   `{independent_answer: str, verdict: "supported" | "unsupported", feedback: str}`. It answers
   the question from the cited chunk texts alone, then judges whether that answer agrees with the
-  research agent's answer. The feedback says what's missing or contradicted. A "not found"
-  answer is always `unsupported`, so the research agent keeps looking.
+  research agent's answer. The feedback says what's missing or contradicted. "Not found"-style
+  text in an answer is always `unsupported`.
 - **Responder** (`rag.agents.responder`). A streaming model call that takes the question, the
   research answer, the evaluator's independent answer and the cited chunks. It writes a concise
   final answer with inline `[n]` markers, where n indexes the citations list. It runs only for
-  supported answers. If no round is supported, the orchestrator skips it and emits an empty
-  `citations` event and a single fixed "couldn't find the answer" `token`.
+  supported answers. For not found or out of turns, the orchestrator emits an empty `citations`
+  event and a single fixed "couldn't find the answer" `token` instead.
 - **Orchestrator** (`rag.agents.orchestrator`). `async run(question: str, history: list[dict]) ->
   AsyncIterator[Event]` yields the events below. `async run_cli(question)` prints them.
 
@@ -103,11 +121,12 @@ question ──► Research agent (≤7 turns) ──submit_answer(answer, chunk
 
 | type | data |
 |---|---|
-| `status` | `{stage: "research"\|"evaluate"\|"respond", round: int, turn: int\|null, message: str}` |
-| `tool_call` | `{id: str, name: str, arguments: object, round: int, turn: int}` |
+| `status` | `{stage: "research"\|"evaluate"\|"respond", turn: int\|null, max_turns: int, message: str}` (research: the turn starting; evaluate: the turn whose answer is checked; respond: null) |
+| `tool_call` | `{id: str, name: str, arguments: object, turn: int}` |
 | `tool_result` | `{id: str, name: str, summary: str}` (e.g. "3 queries, 15 hits") |
-| `research_answer` | `{round: int, answer: str, citations: int[]}` |
-| `evaluation` | `{round: int, verdict: "supported"\|"unsupported", independent_answer: str, feedback: str}` |
+| `research_answer` | `{turn: int, status: "answered"\|"not_found"\|"invalid", answer: str, citations: int[], reason: str}` (every final message from the agent; "invalid" carries the error in `reason` and research continues) |
+| `evaluation` | `{turn: int, verdict: "supported"\|"unsupported", independent_answer: str, feedback: str}` |
+| `outcome` | `{result: "supported"\|"not_found"\|"out_of_turns", turns_used: int}` (sent once, right before `citations`) |
 | `citations` | `[{n: int, chunk_id: int, article_id: int, title: str, section: str\|null, url: str}]` (sent before tokens) |
 | `token` | `{delta: str}` (final answer text) |
 | `done` | `{}` |

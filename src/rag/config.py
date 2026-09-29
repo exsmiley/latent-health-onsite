@@ -33,8 +33,7 @@ class Settings(BaseSettings):
     embed_batch_size: int = 128
 
     # Agents
-    research_max_turns: int = 7  # model calls per research round
-    max_research_rounds: int = 3  # initial round + evaluator-requested retries
+    research_max_turns: int = 7  # total research-agent model calls per question
     search_top_k: int = 5
     blurb_words: int = 40
 

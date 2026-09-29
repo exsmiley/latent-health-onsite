@@ -11,12 +11,15 @@ EventType = Literal[
     "tool_result",
     "research_answer",
     "evaluation",
+    "outcome",
     "citations",
     "token",
     "done",
     "error",
 ]
 Stage = Literal["research", "evaluate", "respond"]
+AnswerStatus = Literal["answered", "not_found", "invalid"]
+OutcomeResult = Literal["supported", "not_found", "out_of_turns"]
 
 
 class Event(BaseModel):
@@ -28,16 +31,16 @@ class Event(BaseModel):
         return f"event: {self.type}\ndata: {payload}\n\n"
 
 
-def status(stage: Stage, round: int, turn: int | None, message: str) -> Event:
+def status(stage: Stage, turn: int | None, max_turns: int, message: str) -> Event:
     return Event(
-        type="status", data={"stage": stage, "round": round, "turn": turn, "message": message}
+        type="status",
+        data={"stage": stage, "turn": turn, "max_turns": max_turns, "message": message},
     )
 
 
-def tool_call(id: str, name: str, arguments: Any, round: int, turn: int) -> Event:
+def tool_call(id: str, name: str, arguments: Any, turn: int) -> Event:
     return Event(
-        type="tool_call",
-        data={"id": id, "name": name, "arguments": arguments, "round": round, "turn": turn},
+        type="tool_call", data={"id": id, "name": name, "arguments": arguments, "turn": turn}
     )
 
 
@@ -45,22 +48,35 @@ def tool_result(id: str, name: str, summary: str) -> Event:
     return Event(type="tool_result", data={"id": id, "name": name, "summary": summary})
 
 
-def research_answer(round: int, answer: str, citations: list[int]) -> Event:
+def research_answer(
+    turn: int, status: AnswerStatus, answer: str, citations: list[int], reason: str
+) -> Event:
     return Event(
-        type="research_answer", data={"round": round, "answer": answer, "citations": citations}
+        type="research_answer",
+        data={
+            "turn": turn,
+            "status": status,
+            "answer": answer,
+            "citations": citations,
+            "reason": reason,
+        },
     )
 
 
-def evaluation(round: int, verdict: str, independent_answer: str, feedback: str) -> Event:
+def evaluation(turn: int, verdict: str, independent_answer: str, feedback: str) -> Event:
     return Event(
         type="evaluation",
         data={
-            "round": round,
+            "turn": turn,
             "verdict": verdict,
             "independent_answer": independent_answer,
             "feedback": feedback,
         },
     )
+
+
+def outcome(result: OutcomeResult, turns_used: int) -> Event:
+    return Event(type="outcome", data={"result": result, "turns_used": turns_used})
 
 
 def citations(items: list[dict]) -> Event:

@@ -3,7 +3,6 @@
 import asyncio
 import copy
 import json
-import types
 from collections.abc import Callable
 from typing import Any
 
@@ -39,12 +38,13 @@ def fc(name: str, args: dict | str, call_id: str | None = None) -> ResponseFunct
     )
 
 
-def msg(text: str) -> ResponseOutputMessage:
+def msg(text: str, phase: str | None = None) -> ResponseOutputMessage:
     return ResponseOutputMessage(
         type="message",
         id=_next_id("msg"),
         role="assistant",
         status="completed",
+        phase=phase,
         content=[ResponseOutputText(type="output_text", text=text, annotations=[])],
     )
 
@@ -53,8 +53,22 @@ def resp(*items: Any) -> Response:
     return Response.model_construct(id=_next_id("resp"), object="response", output=list(items))
 
 
-def submit(answer: str, citations: list[int]) -> Response:
-    return resp(fc("submit_answer", {"answer": answer, "citations": citations}))
+def final(payload: dict | str) -> Response:
+    """A research reply without tool calls: the structured final answer."""
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    return resp(msg(text, phase="final_answer"))
+
+
+def answer(text: str, citations: list) -> Response:
+    return final({"status": "answered", "answer": text, "citations": citations, "reason": ""})
+
+
+def not_found(reason: str = "Searched Einstein's article; no pet is mentioned.") -> Response:
+    return final({"status": "not_found", "answer": "", "citations": [], "reason": reason})
+
+
+def search(query: str = "q", call_id: str | None = None) -> Response:
+    return resp(fc("semantic_search", {"queries": [query], "top_k": None}, call_id))
 
 
 def verdict(verdict: str, independent: str = "indep", feedback: str = "fb") -> Response:
@@ -199,25 +213,17 @@ async def fake_fetch(chunk_ids: list[int] = [], article_ids: list[int] = []) -> 
 def install(
     monkeypatch, script: list[Any], tools: ToolRecorder | None = None
 ) -> tuple[FakeClient, ToolRecorder]:
-    """Swap in the fake model client and fake rag.tools.{registry,fetch} modules."""
-    import sys
-
+    """Swap in the fake model client and fake tools (patched on the real tool modules)."""
     import rag.agents.model
-    import rag.tools
+    from rag.tools import fetch, registry
 
     client = FakeClient(script)
     tools = tools or ToolRecorder()
     monkeypatch.setattr(rag.agents.model, "get_client", lambda: client)
-
-    registry = types.ModuleType("rag.tools.registry")
-    registry.TOOL_SPECS = TOOL_SPECS
-    registry.dispatch = tools.dispatch
-    registry.summarize = tools.summarize
-    fetch_mod = types.ModuleType("rag.tools.fetch")
-    fetch_mod.fetch = fake_fetch
-    for name, mod in (("registry", registry), ("fetch", fetch_mod)):
-        monkeypatch.setitem(sys.modules, f"rag.tools.{name}", mod)
-        monkeypatch.setattr(rag.tools, name, mod, raising=False)
+    monkeypatch.setattr(registry, "TOOL_SPECS", TOOL_SPECS)
+    monkeypatch.setattr(registry, "dispatch", tools.dispatch)
+    monkeypatch.setattr(registry, "summarize", tools.summarize)
+    monkeypatch.setattr(fetch, "fetch", fake_fetch)
     return client, tools
 
 

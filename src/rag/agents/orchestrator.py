@@ -1,18 +1,14 @@
-"""Orchestrator: research -> evaluate (-> retry research) -> respond, as a stream of events."""
+"""Orchestrator: research (<-> evaluate) -> respond, as a stream of events."""
 
 import json
 import sys
 from collections.abc import AsyncIterator
 
+from rag import db
 from rag.agents import events
 from rag.agents.evaluator import Evaluation, evaluate
-from rag.agents.events import Event
-from rag.agents.research import (
-    ResearchAgent,
-    Submission,
-    no_submission_feedback,
-    retry_feedback,
-)
+from rag.agents.events import Event, OutcomeResult
+from rag.agents.research import ResearchAgent, Submission, retry_feedback
 from rag.agents.responder import respond
 from rag.config import get_settings
 
@@ -36,61 +32,53 @@ def _citation_items(submission: Submission) -> list[dict]:
 async def run(question: str, history: list[dict] | None = None) -> AsyncIterator[Event]:
     """Run the whole pipeline for one question, yielding the SSE-contract events.
 
-    Always ends with `done`. Any exception becomes an `error` event first.
+    One budget of `settings.research_max_turns` research turns. The agent may answer after any
+    turn; an answer the evaluator rejects sends its feedback back into the same conversation
+    and research continues with the turns left. Always ends with `done`. Any exception
+    becomes an `error` event first.
     """
     history = history or []
-    settings = get_settings()
-    max_rounds = max(1, settings.max_research_rounds)
-    max_turns = settings.research_max_turns
+    max_turns = get_settings().research_max_turns
     try:
         agent = ResearchAgent(question=question, history=history)
-        final: Submission | None = None  # latest valid submission
+        result: OutcomeResult = "out_of_turns"
+        final: Submission | None = None
         final_eval: Evaluation | None = None
-        supported = False
-        feedback: str | None = None
 
-        for round_no in range(1, max_rounds + 1):
-            async for ev in agent.run_round(round_no, feedback):
+        for turn in range(1, max_turns + 1):
+            async for ev in agent.run_turn(turn, max_turns):
                 yield ev
-            sub = agent.submission
-
             if agent.not_found is not None:
-                # The agent concluded the index doesn't have the answer: stop now, no evaluation.
-                yield events.research_answer(round_no, f"Not found: {agent.not_found}", [])
-                supported = False
+                result = "not_found"  # no evaluation: the agent says the index lacks it
                 break
-
+            sub = agent.submission
             if sub is None:
-                reason = agent.last_error or "no valid submission"
-                yield events.evaluation(
-                    round_no,
-                    "unsupported",
-                    "",
-                    f"The research agent did not submit a valid answer. {reason}",
-                )
-                feedback = no_submission_feedback(reason, max_turns)
-                continue
-
-            final, final_eval = sub, None
-            yield events.research_answer(round_no, sub.answer, sub.citations)
+                continue  # tool turn, or an invalid answer that was fed back
             yield events.status(
-                "evaluate", round_no, None, "Checking the answer against the cited sources"
+                "evaluate", turn, max_turns, "Checking the answer against the cited sources"
             )
-            final_eval = await evaluate(question, sub.answer, sub.chunks)
+            evaluation = await evaluate(question, sub.answer, sub.chunks)
             yield events.evaluation(
-                round_no, final_eval.verdict, final_eval.independent_answer, final_eval.feedback
+                turn, evaluation.verdict, evaluation.independent_answer, evaluation.feedback
             )
-            if final_eval.supported:
-                supported = True
+            if evaluation.supported:
+                result, final, final_eval = "supported", sub, evaluation
                 break
-            feedback = retry_feedback(final_eval.feedback, final_eval.independent_answer, max_turns)
+            if turn < max_turns:
+                agent.add_feedback(
+                    retry_feedback(
+                        evaluation.feedback, evaluation.independent_answer, max_turns - turn
+                    )
+                )
 
-        if not supported or final is None:
-            yield events.status("respond", round_no, None, "The answer could not be found")
+        if final is None:
+            yield events.status("respond", None, max_turns, "The answer could not be found")
+            yield events.outcome(result, agent.turns_used)
             yield events.citations([])
             yield events.token(NOT_FOUND_MESSAGE)
         else:
-            yield events.status("respond", round_no, None, "Writing the final answer")
+            yield events.status("respond", None, max_turns, "Writing the final answer")
+            yield events.outcome(result, agent.turns_used)
             yield events.citations(_citation_items(final))
             async for delta in respond(
                 question=question,
@@ -115,20 +103,29 @@ def format_event(ev: Event) -> str | None:
     d = ev.data
     match ev.type:
         case "status":
-            turn = f" t{d['turn']}" if d["turn"] is not None else ""
-            return f"\n[{d['stage']} r{d['round']}{turn}] {d['message']}"
+            turn = f" {d['turn']}/{d['max_turns']}" if d["turn"] is not None else ""
+            return f"\n[{d['stage']}{turn}] {d['message']}"
         case "tool_call":
             return f"  -> {d['name']} {_short(d['arguments'])}"
         case "tool_result":
             return f"  <- {d['name']}: {d['summary']}"
         case "research_answer":
-            return f"  answer (round {d['round']}): {_short(d['answer'], 400)}\n  citations: {d['citations']}"
+            lines = [f"  {d['status']} (turn {d['turn']})"]
+            if d["answer"]:
+                lines.append(f"  answer: {_short(d['answer'], 400)}")
+            if d["citations"]:
+                lines.append(f"  citations: {d['citations']}")
+            if d["reason"]:
+                lines.append(f"  reason: {_short(d['reason'], 400)}")
+            return "\n".join(lines)
         case "evaluation":
             return (
                 f"  verdict: {d['verdict'].upper()}\n"
                 f"  independent answer: {_short(d['independent_answer'], 400)}\n"
                 f"  feedback: {_short(d['feedback'], 400)}"
             )
+        case "outcome":
+            return f"\n[outcome] {d['result']} after {d['turns_used']} turn(s)"
         case "citations":
             lines = ["\nSources:"] + [
                 f"  [{c['n']}] {c['title']}"
@@ -144,8 +141,6 @@ def format_event(ev: Event) -> str | None:
 
 
 async def run_cli(question: str) -> None:
-    from rag.db import close_pool
-
     out = sys.stdout
     try:
         async for ev in run(question, []):
@@ -160,4 +155,4 @@ async def run_cli(question: str) -> None:
             if line is not None:
                 print(line, file=out, flush=True)
     finally:
-        await close_pool()
+        await db.close_pool()

@@ -1,8 +1,12 @@
-// In-browser fake backend for `?mock=1` / VITE_MOCK=1. Emits a scripted, realistic event
-// sequence with delays: round 1 (2 research turns) -> unsupported -> round 2 -> supported ->
-// citations -> streamed tokens -> done.
+// In-browser fake backend for `?mock=1` / VITE_MOCK=1. Emits scripted, realistic event
+// sequences with delays, following the contract in docs/ARCHITECTURE.md:
+// - default: turn 1 searches, turn 2 fetches, turn 3 answers -> unsupported, turn 4 searches +
+//   fetches, turn 5 answers -> supported -> outcome -> citations -> streamed tokens -> done.
+// - question contains "notfound": two turns of searching, turn 3 answers "not_found" -> outcome
+//   -> empty citations -> fixed "couldn't find" token -> done.
+// - question contains "error": an error event.
 
-import type { ChatEvent, ChatMessage, Chunk } from "./types";
+import type { ChatEvent, ChatMessage, Chunk, Stage } from "./types";
 
 const WIKI = "https://simple.wikipedia.org/wiki/";
 
@@ -70,31 +74,89 @@ const FINAL_ANSWER =
 
 type Step = [delayMs: number, event: ChatEvent];
 
-function script(question: string): Step[] {
-  const q = question.length > 60 ? question.slice(0, 57) + "..." : question;
+const MAX_TURNS = 7;
+
+const NOT_FOUND_TEXT = "Sorry, I couldn't find the answer to that in Simple English Wikipedia.";
+
+const status = (stage: Stage, turn: number | null, message: string): ChatEvent => ({
+  type: "status",
+  data: { stage, turn, max_turns: MAX_TURNS, message },
+});
+
+const call = (id: string, name: string, turn: number, args: Record<string, unknown>): ChatEvent => ({
+  type: "tool_call",
+  data: { id, name, turn, arguments: args },
+});
+
+const result = (id: string, name: string, summary: string): ChatEvent => ({
+  type: "tool_result",
+  data: { id, name, summary },
+});
+
+function short(question: string): string {
+  return question.length > 60 ? question.slice(0, 57) + "..." : question;
+}
+
+function supportedScript(question: string): Step[] {
   return [
-    [250, { type: "status", data: { stage: "research", round: 1, turn: 1, message: `Researching "${q}"` } }],
-    [500, { type: "tool_call", data: { id: "call_a1", name: "semantic_search", round: 1, turn: 1, arguments: { queries: ["When was the Eiffel Tower built?", "Eiffel Tower construction history"], top_k: 5 } } }],
-    [80, { type: "tool_call", data: { id: "call_a2", name: "keyword_search", round: 1, turn: 1, arguments: { queries: ["Eiffel Tower 1889"], top_k: 5 } } }],
-    [650, { type: "tool_result", data: { id: "call_a2", name: "keyword_search", summary: "1 query, 5 hits" } }],
-    [200, { type: "tool_result", data: { id: "call_a1", name: "semantic_search", summary: "2 queries, 10 hits" } }],
-    [300, { type: "status", data: { stage: "research", round: 1, turn: 2, message: "Reading chunks" } }],
-    [500, { type: "tool_call", data: { id: "call_a3", name: "fetch", round: 1, turn: 2, arguments: { chunk_ids: [4101, 4102] } } }],
-    [450, { type: "tool_result", data: { id: "call_a3", name: "fetch", summary: "2 chunks" } }],
-    [700, { type: "research_answer", data: { round: 1, answer: "The Eiffel Tower was built from 1887 to 1889 for the World's Fair. It is about 330 metres tall.", citations: [4101, 4102] } }],
-    [250, { type: "status", data: { stage: "evaluate", round: 1, turn: null, message: "Checking the answer against the cited chunks" } }],
-    [1100, { type: "evaluation", data: { round: 1, verdict: "unsupported", independent_answer: "The Eiffel Tower was built between 1887 and 1889 for the 1889 World's Fair. The cited chunks do not give its height.", feedback: "The construction dates are supported by chunk 4101, but neither cited chunk states the height of 330 metres. Cite a chunk that gives the height." } }],
-    [300, { type: "status", data: { stage: "research", round: 2, turn: 1, message: "Retrying with evaluator feedback" } }],
-    [550, { type: "tool_call", data: { id: "call_b1", name: "keyword_search", round: 2, turn: 1, arguments: { queries: ["Eiffel Tower height metres", "Eiffel Tower tall antennas"], top_k: 5 } } }],
-    [600, { type: "tool_result", data: { id: "call_b1", name: "keyword_search", summary: "2 queries, 9 hits" } }],
-    [300, { type: "status", data: { stage: "research", round: 2, turn: 2, message: "Reading chunks" } }],
-    [450, { type: "tool_call", data: { id: "call_b2", name: "fetch", round: 2, turn: 2, arguments: { chunk_ids: [4103, 9377] } } }],
-    [400, { type: "tool_result", data: { id: "call_b2", name: "fetch", summary: "2 chunks" } }],
-    [650, { type: "research_answer", data: { round: 2, answer: "The Eiffel Tower was built from January 1887 to March 1889 for the 1889 World's Fair, designed by Gustave Eiffel's company. It is 330 m tall with antennas (300 m without).", citations: [4101, 4103, 9377] } }],
-    [250, { type: "status", data: { stage: "evaluate", round: 2, turn: null, message: "Checking the answer against the cited chunks" } }],
-    [1000, { type: "evaluation", data: { round: 2, verdict: "supported", independent_answer: "Built 1887-1889 for the World's Fair by Gustave Eiffel's company; 330 m tall including antennas.", feedback: "All claims are supported by the cited chunks." } }],
-    [250, { type: "status", data: { stage: "respond", round: 2, turn: null, message: "Writing the final answer" } }],
-    [300, {
+    [250, status("research", 1, `Researching "${short(question)}"`)],
+    [500, call("call_1a", "semantic_search", 1, { queries: ["When was the Eiffel Tower built?", "Eiffel Tower construction history"], top_k: 5 })],
+    [80, call("call_1b", "keyword_search", 1, { queries: ["Eiffel Tower 1889"], top_k: 5 })],
+    [650, result("call_1b", "keyword_search", "1 query, 5 hits")],
+    [200, result("call_1a", "semantic_search", "2 queries, 10 hits")],
+    [300, status("research", 2, "Reading chunks")],
+    [500, call("call_2a", "fetch", 2, { chunk_ids: [4101, 4102] })],
+    [450, result("call_2a", "fetch", "2 chunks")],
+    [300, status("research", 3, "Deciding whether the evidence is enough")],
+    [700, {
+      type: "research_answer",
+      data: {
+        turn: 3,
+        status: "answered",
+        answer: "The Eiffel Tower was built from 1887 to 1889 for the World's Fair. It is about 330 metres tall.",
+        citations: [4101, 4102],
+        reason: "",
+      },
+    }],
+    [250, status("evaluate", 3, "Checking the answer against the cited chunks")],
+    [1100, {
+      type: "evaluation",
+      data: {
+        turn: 3,
+        verdict: "unsupported",
+        independent_answer: "The Eiffel Tower was built between 1887 and 1889 for the 1889 World's Fair. The cited chunks do not give its height.",
+        feedback: "The construction dates are supported by chunk 4101, but neither cited chunk states the height of 330 metres. Cite a chunk that gives the height.",
+      },
+    }],
+    [300, status("research", 4, "Continuing research with the evaluator's feedback")],
+    [550, call("call_4a", "keyword_search", 4, { queries: ["Eiffel Tower height metres", "Eiffel Tower tall antennas"], top_k: 5 })],
+    [60, call("call_4b", "fetch", 4, { chunk_ids: [4103, 9377] })],
+    [450, result("call_4b", "fetch", "2 chunks")],
+    [200, result("call_4a", "keyword_search", "2 queries, 9 hits")],
+    [300, status("research", 5, "Deciding whether the evidence is enough")],
+    [650, {
+      type: "research_answer",
+      data: {
+        turn: 5,
+        status: "answered",
+        answer: "The Eiffel Tower was built from January 1887 to March 1889 for the 1889 World's Fair, designed by Gustave Eiffel's company. It is 330 m tall with antennas (300 m without).",
+        citations: [4101, 4103, 9377],
+        reason: "",
+      },
+    }],
+    [250, status("evaluate", 5, "Checking the answer against the cited chunks")],
+    [1000, {
+      type: "evaluation",
+      data: {
+        turn: 5,
+        verdict: "supported",
+        independent_answer: "Built 1887-1889 for the World's Fair by Gustave Eiffel's company; 330 m tall including antennas.",
+        feedback: "All claims are supported by the cited chunks.",
+      },
+    }],
+    [250, status("respond", null, "Writing the final answer")],
+    [100, { type: "outcome", data: { result: "supported", turns_used: 5 } }],
+    [200, {
       type: "citations",
       data: [
         { n: 1, chunk_id: 4101, article_id: 812, title: "Eiffel Tower", section: null, url: `${WIKI}Eiffel%20Tower` },
@@ -102,6 +164,32 @@ function script(question: string): Step[] {
         { n: 3, chunk_id: 9377, article_id: 2290, title: "Gustave Eiffel", section: "Career", url: `${WIKI}Gustave%20Eiffel` },
       ],
     }],
+  ];
+}
+
+function notFoundScript(question: string): Step[] {
+  return [
+    [250, status("research", 1, `Researching "${short(question)}"`)],
+    [500, call("call_1a", "semantic_search", 1, { queries: ["Eiffel Tower paint colour 1889", "original colour of the Eiffel Tower"], top_k: 5 })],
+    [80, call("call_1b", "keyword_search", 1, { queries: ["Eiffel Tower paint"], top_k: 5 })],
+    [600, result("call_1a", "semantic_search", "2 queries, 10 hits")],
+    [150, result("call_1b", "keyword_search", "1 query, 0 hits")],
+    [300, status("research", 2, "Deciding whether the evidence is enough")],
+    [500, call("call_2a", "keyword_search", 2, { queries: ["Venetian red", "Eiffel Tower repainted"], top_k: 5 })],
+    [550, result("call_2a", "keyword_search", "2 queries, 0 hits")],
+    [300, status("research", 3, "Deciding whether the evidence is enough")],
+    [700, {
+      type: "research_answer",
+      data: {
+        turn: 3,
+        status: "not_found",
+        answer: "",
+        citations: [],
+        reason: "Searched semantically and by keyword for the tower's original paint colour and repainting history. The Eiffel Tower chunks cover its construction, height and visitors, but none mention its colour.",
+      },
+    }],
+    [200, { type: "outcome", data: { result: "not_found", turns_used: 3 } }],
+    [100, { type: "citations", data: [] }],
   ];
 }
 
@@ -129,15 +217,24 @@ export async function mockChatStream(
   if (/\berror\b/i.test(question)) {
     // Handy for demoing the inline error state: ask anything containing "error".
     await sleep(400, signal);
-    onEvent({ type: "status", data: { stage: "research", round: 1, turn: 1, message: "Researching" } });
+    onEvent(status("research", 1, "Researching"));
     await sleep(600, signal);
     onEvent({ type: "error", data: { message: "Mock error: the research agent failed (simulated)." } });
     onEvent({ type: "done", data: {} });
     return;
   }
-  for (const [delay, ev] of script(question)) {
+  const notFound = /notfound/i.test(question);
+  for (const [delay, ev] of notFound ? notFoundScript(question) : supportedScript(question)) {
     await sleep(delay, signal);
     onEvent(ev);
+  }
+  if (notFound) {
+    // The orchestrator sends the fixed "couldn't find" reply as a single token.
+    await sleep(150, signal);
+    onEvent({ type: "token", data: { delta: NOT_FOUND_TEXT } });
+    await sleep(100, signal);
+    onEvent({ type: "done", data: {} });
+    return;
   }
   // Stream the final answer in small, irregular pieces, like a model would.
   const pieces = FINAL_ANSWER.match(/\S+\s*|\s+/g) ?? [];

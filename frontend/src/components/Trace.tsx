@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { formatArgs, type AssistantState, type RoundState } from "../trace";
-import type { Stage } from "../types";
+import {
+  continuation,
+  formatArgs,
+  OUTCOME_LABEL,
+  summaryLine,
+  type AssistantState,
+  type TurnState,
+} from "../trace";
+import type { OutcomeData, ResearchAnswerData, Stage, StatusData, Verdict } from "../types";
 
 const STAGES: { key: Stage; label: string }[] = [
   { key: "research", label: "Research" },
   { key: "evaluate", label: "Evaluate" },
   { key: "respond", label: "Respond" },
 ];
+
+const turnOf = (turn: number, max: number | null) => (max != null ? `Turn ${turn} / ${max}` : `Turn ${turn}`);
 
 export function Trace({ state }: { state: AssistantState }) {
   const running = state.phase === "running";
@@ -19,7 +28,7 @@ export function Trace({ state }: { state: AssistantState }) {
     wasRunning.current = running;
   }, [running]);
 
-  if (state.rounds.length === 0 && !state.status) {
+  if (state.turns.length === 0 && !state.status) {
     return running ? (
       <div className="trace-pending">
         <span className="spinner" /> Starting…
@@ -27,12 +36,7 @@ export function Trace({ state }: { state: AssistantState }) {
     ) : null;
   }
 
-  const toolCount = state.rounds.reduce(
-    (n, r) => n + r.turns.reduce((m, t) => m + t.calls.length, 0),
-    0,
-  );
-  const last = state.rounds[state.rounds.length - 1];
-  const verdict = last?.evaluation?.verdict;
+  const lastTurn = state.turns[state.turns.length - 1]?.turn;
 
   return (
     <details
@@ -49,33 +53,30 @@ export function Trace({ state }: { state: AssistantState }) {
           <span className="trace-live">
             <span className="spinner" />
             <StageSteps stage={state.status.stage} />
-            <span className="muted trace-where">
-              Round {state.status.round}
-              {state.status.turn != null && ` · turn ${state.status.turn}`}
-            </span>
+            {state.status.turn != null && (
+              <span className="muted trace-where">{turnOf(state.status.turn, state.maxTurns)}</span>
+            )}
           </span>
         ) : (
-          <span className="muted trace-summary">
-            {state.rounds.length} round{state.rounds.length === 1 ? "" : "s"} · {toolCount} tool call
-            {toolCount === 1 ? "" : "s"}
-            {verdict && <VerdictBadge verdict={verdict} small />}
-          </span>
+          <span className="muted trace-summary">{summaryLine(state)}</span>
         )}
       </summary>
 
       <div className="trace-body">
         {running && state.status?.message && <div className="trace-status">{state.status.message}</div>}
-        <ol className="rounds">
-          {state.rounds.map((r, i) => (
-            <RoundView
-              key={r.round}
-              r={r}
-              isCurrent={running && i === state.rounds.length - 1}
-              hasNext={i < state.rounds.length - 1}
-              currentStage={state.status?.round === r.round ? state.status.stage : undefined}
+        <ol className="timeline">
+          {state.turns.map((t) => (
+            <TurnView
+              key={t.turn}
+              t={t}
+              maxTurns={state.maxTurns}
+              running={running}
+              isLast={t.turn === lastTurn}
+              status={state.status}
             />
           ))}
         </ol>
+        {state.outcome && <OutcomeLine outcome={state.outcome} maxTurns={state.maxTurns} />}
       </div>
     </details>
   );
@@ -94,68 +95,63 @@ function StageSteps({ stage }: { stage: Stage }) {
   );
 }
 
-function VerdictBadge({ verdict, small }: { verdict: "supported" | "unsupported"; small?: boolean }) {
+function VerdictBadge({ verdict }: { verdict: Verdict }) {
   return (
-    <span className={`badge ${verdict}${small ? " small" : ""}`}>
-      {verdict === "supported" ? "✓ Supported" : "✗ Unsupported"}
-    </span>
+    <span className={`badge ${verdict}`}>{verdict === "supported" ? "✓ Supported" : "✗ Unsupported"}</span>
   );
 }
 
-function RoundView({
-  r,
-  isCurrent,
-  hasNext,
-  currentStage,
+function TurnView({
+  t,
+  maxTurns,
+  running,
+  isLast,
+  status,
 }: {
-  r: RoundState;
-  isCurrent: boolean;
-  hasNext: boolean;
-  currentStage?: Stage;
+  t: TurnState;
+  maxTurns: number | null;
+  running: boolean;
+  isLast: boolean;
+  status: StatusData | null;
 }) {
-  const evaluating = isCurrent && currentStage === "evaluate" && !r.evaluation;
+  const live = running && isLast;
+  const thinking = live && status?.stage === "research" && t.calls.length === 0 && !t.answer;
+  const evaluating =
+    running && status?.stage === "evaluate" && status.turn === t.turn && t.answer?.status === "answered" && !t.evaluation;
+  const next = continuation(t, maxTurns);
+  const tone = t.evaluation?.verdict ?? (t.answer?.status === "invalid" ? "unsupported" : "");
+
   return (
-    <li className={`round${r.evaluation ? ` ${r.evaluation.verdict}` : ""}`}>
-      <div className="round-head">
-        <span className="round-label">Round {r.round}</span>
-        {r.round > 1 && <span className="tag">retry</span>}
-      </div>
+    <li className={`turn${tone ? ` ${tone}` : ""}`}>
+      <div className="turn-label">{turnOf(t.turn, maxTurns)}</div>
 
-      {r.turns.map((t) => (
-        <div className="turn" key={t.turn}>
-          <div className="turn-label">Turn {t.turn}</div>
-          {t.calls.length === 0 && isCurrent && currentStage === "research" && (
-            <div className="muted small">
-              <span className="spinner" /> thinking…
-            </div>
-          )}
-          <ul className="calls">
-            {t.calls.map(({ call, result }) => (
-              <li key={call.id} className="call">
-                <span className={`tool-name tool-${call.name}`}>{call.name}</span>
-                <span className="call-args">{formatArgs(call.name, call.arguments)}</span>
-                <span className="call-result">
-                  {result ? (
-                    <>→ {result.summary}</>
-                  ) : isCurrent ? (
-                    <span className="spinner" />
-                  ) : (
-                    <span className="muted">no result</span>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
-
-      {r.answer && (
-        <div className="proposed">
-          <div className="step-label">Proposed answer</div>
-          <p>{r.answer.answer}</p>
-          <div className="muted small">cites chunks {r.answer.citations.join(", ") || "none"}</div>
+      {thinking && (
+        <div className="muted small">
+          <span className="spinner" /> thinking…
         </div>
       )}
+
+      {t.calls.length > 0 && (
+        <ul className="calls">
+          {t.calls.map(({ call, result }) => (
+            <li key={call.id} className="call">
+              <span className={`tool-name tool-${call.name}`}>{call.name}</span>
+              <span className="call-args">{formatArgs(call.arguments)}</span>
+              <span className="call-result">
+                {result ? (
+                  <>→ {result.summary}</>
+                ) : running ? (
+                  <span className="spinner" />
+                ) : (
+                  <span className="muted">no result</span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {t.answer && <AnswerView a={t.answer} />}
 
       {evaluating && (
         <div className="evaluation pending">
@@ -163,30 +159,67 @@ function RoundView({
         </div>
       )}
 
-      {r.evaluation && (
-        <div className={`evaluation ${r.evaluation.verdict}`}>
+      {t.evaluation && (
+        <div className={`evaluation ${t.evaluation.verdict}`}>
           <div className="eval-head">
             <span className="step-label">Evaluator</span>
-            <VerdictBadge verdict={r.evaluation.verdict} />
+            <VerdictBadge verdict={t.evaluation.verdict} />
           </div>
-          {r.evaluation.feedback && <p>{r.evaluation.feedback}</p>}
-          {r.evaluation.independent_answer && (
+          {t.evaluation.feedback && <p>{t.evaluation.feedback}</p>}
+          {t.evaluation.independent_answer && (
             <details className="independent">
               <summary>Evaluator's independent answer</summary>
-              <p>{r.evaluation.independent_answer}</p>
+              <p>{t.evaluation.independent_answer}</p>
             </details>
           )}
         </div>
       )}
 
-      {r.evaluation?.verdict === "unsupported" &&
-        (hasNext ? (
-          <div className="retry-arrow">↻ back to research with the evaluator's feedback</div>
-        ) : (
-          currentStage === "respond" && (
-            <div className="retry-arrow final">Max rounds reached: answer not found</div>
-          )
-        ))}
+      {next?.kind === "continue" && (
+        <div className="continue">
+          ↓ continuing research
+          {next.turnsLeft != null && ` (${next.turnsLeft} turn${next.turnsLeft === 1 ? "" : "s"} left)`}
+          {t.evaluation ? " with the evaluator's feedback" : ""}
+        </div>
+      )}
+      {next?.kind === "exhausted" && <div className="continue exhausted">No turns left</div>}
     </li>
+  );
+}
+
+function AnswerView({ a }: { a: ResearchAnswerData }) {
+  if (a.status === "answered") {
+    return (
+      <div className="proposed">
+        <div className="step-label">Answer</div>
+        <p>{a.answer}</p>
+        <div className="muted small">cites chunks {a.citations.join(", ") || "none"}</div>
+      </div>
+    );
+  }
+  if (a.status === "not_found") {
+    return (
+      <div className="proposed not-found">
+        <div className="step-label">Not found</div>
+        {a.reason && <p>{a.reason}</p>}
+      </div>
+    );
+  }
+  return (
+    <div className="proposed invalid">
+      <div className="step-label">Invalid answer</div>
+      <p className="error-text">{a.reason || "The answer was rejected."}</p>
+    </div>
+  );
+}
+
+function OutcomeLine({ outcome, maxTurns }: { outcome: OutcomeData; maxTurns: number | null }) {
+  const n = outcome.turns_used;
+  const used = maxTurns != null ? `${n} of ${maxTurns} turns` : `${n} turn${n === 1 ? "" : "s"}`;
+  return (
+    <div className={`outcome ${outcome.result}`}>
+      <span className={`badge ${outcome.result}`}>{OUTCOME_LABEL[outcome.result]}</span>
+      <span className="muted">{outcome.result === "out_of_turns" ? `all ${n} turns used` : `after ${used}`}</span>
+    </div>
   );
 }

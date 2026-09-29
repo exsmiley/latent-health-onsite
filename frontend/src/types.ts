@@ -11,8 +11,9 @@ export type Stage = "research" | "evaluate" | "respond";
 
 export interface StatusData {
   stage: Stage;
-  round: number;
+  /** research: the turn starting; evaluate: the turn whose answer is checked; respond: null. */
   turn: number | null;
+  max_turns: number;
   message: string;
 }
 
@@ -20,7 +21,6 @@ export interface ToolCallData {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
-  round: number;
   turn: number;
 }
 
@@ -30,17 +30,32 @@ export interface ToolResultData {
   summary: string;
 }
 
+export type ResearchAnswerStatus = "answered" | "not_found" | "invalid";
+
+/** Every final (tool-call-free) message from the research agent. "invalid" carries the error in `reason`. */
 export interface ResearchAnswerData {
-  round: number;
+  turn: number;
+  status: ResearchAnswerStatus;
   answer: string;
   citations: number[];
+  reason: string;
 }
 
+export type Verdict = "supported" | "unsupported";
+
 export interface EvaluationData {
-  round: number;
-  verdict: "supported" | "unsupported";
+  turn: number;
+  verdict: Verdict;
   independent_answer: string;
   feedback: string;
+}
+
+export type OutcomeResult = "supported" | "not_found" | "out_of_turns";
+
+/** Sent once, right before `citations`. */
+export interface OutcomeData {
+  result: OutcomeResult;
+  turns_used: number;
 }
 
 export interface Citation {
@@ -66,6 +81,7 @@ export type ChatEvent =
   | { type: "tool_result"; data: ToolResultData }
   | { type: "research_answer"; data: ResearchAnswerData }
   | { type: "evaluation"; data: EvaluationData }
+  | { type: "outcome"; data: OutcomeData }
   | { type: "citations"; data: Citation[] }
   | { type: "token"; data: TokenData }
   | { type: "done"; data: Record<string, never> }
@@ -79,6 +95,7 @@ export const EVENT_TYPES: readonly ChatEventType[] = [
   "tool_result",
   "research_answer",
   "evaluation",
+  "outcome",
   "citations",
   "token",
   "done",

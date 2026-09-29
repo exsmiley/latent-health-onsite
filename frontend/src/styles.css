@@ -280,34 +280,22 @@ a {
   color: var(--muted);
   font-style: italic;
 }
-.rounds {
+.timeline {
   list-style: none;
   margin: 0;
   padding: 0;
 }
-.round {
+.turn {
   position: relative;
-  margin-top: 12px;
-  padding: 8px 0 0 14px;
+  margin-top: 10px;
+  padding: 4px 0 2px 14px;
   border-left: 3px solid var(--border);
 }
-.round.supported {
+.turn.supported {
   border-left-color: var(--ok);
 }
-.round.unsupported {
+.turn.unsupported {
   border-left-color: var(--bad);
-}
-.round-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-.round-label {
-  font-weight: 650;
-}
-.turn {
-  margin: 6px 0;
 }
 .turn-label,
 .step-label {
@@ -393,9 +381,6 @@ a {
   border-radius: 999px;
   color: #fff;
 }
-.badge.small {
-  font-size: 0.68rem;
-}
 .badge.supported {
   background: var(--ok);
 }
@@ -407,15 +392,31 @@ a {
     color: #111;
   }
 }
-.retry-arrow {
-  margin: 6px 0 -4px -14px;
-  padding-left: 8px;
+.proposed.not-found {
+  border-left: 3px solid var(--warn);
+}
+.continue {
+  margin: 6px 0 2px;
   color: var(--bad);
   font-weight: 600;
   font-size: 0.8rem;
 }
-.retry-arrow.final {
+.continue.exhausted {
   color: var(--warn);
+}
+.outcome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 0.82rem;
+}
+.badge.not_found,
+.badge.out_of_turns {
+  background: var(--warn);
 }
 
 /* Spinner */
