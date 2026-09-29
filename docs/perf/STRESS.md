@@ -158,8 +158,10 @@ Planned command (at most 264 questions, early stop at 20% errors or 4x p50):
 uv run uvicorn rag.api.app:app --host 127.0.0.1 --port 8300 \
     --log-config scripts/stress_logging.json > evals/results/stress/server.log 2>&1 &
 uv run python scripts/stress_test.py --levels 1,2,4,8,16,32,64 --timeout 300 --max-requests 300 \
-    --server-log evals/results/stress/server.log --label ramp
+    --server-log evals/results/stress/server.log --label ramp 2>&1 | tee evals/results/stress/ramp.log
 ```
+
+Each level's summary line lands in `evals/results/stress/ramp.log` as that level finishes.
 
 Table: _TBD_
 
