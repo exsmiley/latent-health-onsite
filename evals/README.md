@@ -108,6 +108,96 @@ The script checks that:
 It prints counts by type, difficulty and hops, and exits non-zero on any error. It only runs
 SELECTs. It currently passes with 0 errors and 0 warnings.
 
+## Running the evals
+
+`rag eval` runs the real pipeline (`rag.agents.orchestrator.run`) on the questions, times every
+stage, counts tokens and grades each answer. It needs the DB and `OPENAI_API_KEY`.
+
+```
+uv run rag eval --set main --limit 5 --label smoke        # quick check
+uv run rag eval --set main --label baseline-7turns         # the full main set
+uv run rag eval --set super_hard --max-turns 15 --label sh-15
+uv run rag eval --ids q001,q017 --no-judge                 # a few questions, exact match only
+uv run rag eval-compare evals/results/A.jsonl evals/results/B.jsonl
+```
+
+(`uv run python -m rag.evals [options]` is the same as `rag eval [options]`.)
+
+| option | default | meaning |
+|---|---|---|
+| `--set` | `main` | `main` (`questions.jsonl`), `super_hard` (`questions_super_hard.jsonl`) or `all` |
+| `--file` | | any question JSONL (overrides `--set`) |
+| `--ids`, `--limit` | | select questions by id / keep the first N |
+| `--max-turns` | `research_max_turns` (7) | research-turn budget for this run |
+| `--concurrency` | 4 | questions in flight at once (lower it on rate limits) |
+| `--timeout` | 600 | per-question timeout in seconds; a timeout is recorded, the run continues |
+| `--no-judge` | judge on | skip the LLM judge and grade by exact match only |
+| `--out`, `--label` | `evals/results/` | where results go and the label in the file name |
+
+### Output
+
+Each run writes two files to `evals/results/` (git-ignored):
+
+- `<UTC timestamp>_<label>.jsonl`: one record per question, appended as each question finishes.
+  - `outcome`: `supported`, `not_found`, `out_of_turns` (from the pipeline's `outcome` event),
+    `error` or `timeout`. Also `turns_used`, the `final_answer`, every `research_answers` and
+    `evaluations` event, the `tool_calls`, and the cited chunks with their `article_id` and
+    `chunk_index`.
+  - `timing` (seconds from the start of the question, `time.perf_counter()` as events arrive):
+    `total_s` (start to `done`), `first_token_s` (first answer token), `research_turns` (each
+    turn, from its `status` event to the next `status` event), `evaluator_calls`, and
+    `responder_first_token_s` / `responder_total_s` (from the respond `status`; supported only).
+  - `usage`: tokens summed over all pipeline model calls (`input_tokens` includes
+    `cached_input_tokens`, `output_tokens` includes `reasoning_tokens`) plus embedding calls.
+    `judge_usage` is counted separately.
+  - `grading`: `exact`, `judge` (`{correct, partially_correct, reason}`), `correct` (the judge's
+    verdict, or `exact` with `--no-judge` or if the judge call fails), `partially_correct`,
+    `citation_recall`, `citation_any_overlap` and `citation_article_recall`.
+- `<same stem>.summary.json`: the run config (set, max_turns, concurrency, timeout, model names,
+  git commit, wall-clock time) and the summary statistics printed at the end.
+
+### Reading the summary
+
+The printed table has one row per question `type` within each tier (`main`, or the `tier` field
+of super-hard questions), plus an `ALL` row. Super-hard tiers also get a table by
+`sequential_depth`.
+
+- `acc`: final correctness (the judge). `exact`: normalized exact match. `part`: the judge's
+  partially-correct rate (some parts of a multi-part answer right).
+- `turns`: mean research turns used. `t_med` / `t_p90` / `t_max`: total time per question.
+- `tok_in` / `cached` / `tok_out`: mean tokens per question. `cost` is shown only when prices
+  are configured (see below).
+- `outcomes`: `sup` supported, `nf` not found, `oot` out of turns, `err` error, `to` timeout.
+
+Then come a "where the time goes" line (mean research-turn and evaluator-call time, responder
+time to first token and total), the citation diagnostics, the 5 slowest questions and every
+wrong answer with what was expected and what the judge said.
+
+Time depends on `--concurrency` (API latency grows under load), so compare runs made at the
+same concurrency.
+
+**Grading.**
+- *Exact match*: the answer, the answer without its parenthetical note, or any alias must occur
+  in the final answer after normalization (casefold, accents, punctuation and a/an/the removed,
+  whole words only). For an expected answer with `;`-separated parts, every part must occur.
+- *Judge*: `settings.chat_model` with a strict JSON schema. It judges factual agreement with
+  the expected answer only, not style. Not-found replies, errors and timeouts are wrong without
+  a judge call.
+- *Citation recall* matches cited chunks to `supporting_chunks` on `(article_id, chunk_index)`.
+  The supporting chunks are one sufficient route, not the only one, so treat it as a
+  diagnostic, not as correctness.
+
+**Cost.** Nothing in the repo states chat-model prices, so cost is off by default and only
+tokens are shown. To estimate it, set USD per 1M tokens in the environment or `.env`:
+`EVAL_PRICE_INPUT_PER_1M`, `EVAL_PRICE_CACHED_INPUT_PER_1M` (defaults to the input price),
+`EVAL_PRICE_OUTPUT_PER_1M` and optionally `EVAL_PRICE_EMBEDDING_PER_1M` (`docs/ARCHITECTURE.md`
+implies 0.02 for `text-embedding-3-small`).
+
+**Comparing runs.** `rag eval-compare RUN_A RUN_B` takes two result `.jsonl` files (or their
+`.summary.json`). It prints the accuracy, exact-match, turns, time (median/p90/max), token and
+outcome changes overall, per tier and per type, then the questions that were fixed (wrong in A,
+correct in B) or broken, and the largest per-question time changes.
+
 ## Caveats
 
 **Snapshot versus reality.** The expected answer follows the corpus in each of these cases:

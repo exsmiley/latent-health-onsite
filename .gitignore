@@ -221,3 +221,7 @@ __marimo__/
 data/
 node_modules/
 frontend/dist/
+
+# Eval results (keep the directory)
+evals/results/*
+!evals/results/.gitkeep

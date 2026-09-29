@@ -3,6 +3,7 @@ from functools import lru_cache
 from openai import AsyncOpenAI
 
 from rag.config import get_settings
+from rag.usage import record_embedding
 
 
 @lru_cache
@@ -18,4 +19,5 @@ async def embed_texts(texts: list[str], *, max_retries: int | None = None) -> li
     if max_retries is not None:
         client = client.with_options(max_retries=max_retries)
     resp = await client.embeddings.create(model=settings.embedding_model, input=texts)
+    record_embedding(getattr(resp, "usage", None))  # no-op unless rag.usage.track_usage() is on
     return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
