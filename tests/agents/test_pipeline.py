@@ -2,9 +2,11 @@ import json
 
 import pytest
 from fakes import (
+    CHUNKS,
     Stream,
     ToolRecorder,
     answer,
+    fake_fetch,
     fc,
     final,
     last_input_text,
@@ -15,11 +17,13 @@ from fakes import (
     verdict,
 )
 
+import rag.db
 from rag.agents import orchestrator
 from rag.agents.evaluator import evaluate
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
 from rag.agents.research import ANSWER_SCHEMA
 from rag.config import get_settings
+from rag.tools import fetch as fetch_tool
 
 
 async def collect(question="When was Einstein born?", history=None):
@@ -389,16 +393,12 @@ async def test_tool_error_is_returned_to_model(fake_env):
 
 
 async def test_evaluator_parses_structured_output(fake_env):
-    from fakes import CHUNKS
-
     fake_env([verdict("unsupported", "1879", "Missing Nobel.")])
     result = await evaluate("q", "a", [CHUNKS[101]])
     assert result.verdict == "unsupported" and result.feedback == "Missing Nobel."
 
 
 async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
-    import rag.db
-
     async def noop():
         return None
 
@@ -453,10 +453,6 @@ async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
 
 
 async def test_citation_check_failure_is_retryable_not_fatal(fake_env, monkeypatch):
-    from fakes import fake_fetch
-
-    from rag.tools import fetch as fetch_tool
-
     fake_env(
         [
             search(),

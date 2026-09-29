@@ -6,6 +6,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from pgvector import Vector
+from pgvector.psycopg import register_vector_async
 
 from rag import db
 from rag.config import get_settings
@@ -99,8 +100,6 @@ async def tools_db():
     try:
         await db.apply_schema()
         async with await psycopg.AsyncConnection.connect(TEST_URL, autocommit=True) as conn:
-            from pgvector.psycopg import register_vector_async
-
             await register_vector_async(conn)
             async with conn.cursor() as cur:
                 await cur.executemany(
