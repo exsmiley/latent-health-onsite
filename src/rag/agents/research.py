@@ -82,12 +82,15 @@ chunk_id, its article_id, the article title and the section heading (if any).
 Pass SEVERAL queries in one call (different phrasings, sub-questions, likely article titles).
 - `keyword_search(queries)`: Postgres full-text search. Good for exact names, rare terms, \
 numbers, dates and quoted phrases. Use it alongside semantic search, not instead of it.
-- Search hits only show a short blurb (the first ~40 words of the chunk). A blurb is NOT enough \
-to cite. Read the chunk first.
-- `fetch(chunk_ids, article_ids)`: reads full text. PREFER fetching specific chunks (several in \
-one call) over whole articles. Fetch a whole article only when you need to scan it to find \
-the right passage. It returns the article's chunk_ids, so you can then fetch or cite the \
-exact chunks.
+- Search hits come in three forms. The top few new hits of each query include `text`: the \
+chunk's FULL text, which you can read and cite directly. Lower-ranked hits only show a `blurb` \
+(the first ~40 words). A blurb is NOT enough to cite: fetch the chunk first. A hit with \
+`"seen": true` was already shown to you (above in the same turn, or in full in an earlier \
+turn), so its text isn't repeated; look it up there.
+- `fetch(chunk_ids, article_ids)`: reads full text. Use it for blurb-only hits and for chunks \
+you haven't seen. PREFER fetching specific chunks (several in one call) over whole articles. \
+Fetch a whole article only when you need to scan it to find the right passage. It returns the \
+article's chunk_ids, so you can then fetch or cite the exact chunks.
 - Each search call takes at most 5 queries. Semantic scores (cosine similarity) and keyword \
 scores (ts_rank_cd) are on different scales, so don't compare them with each other. Rank hits \
 within one tool's results only, and judge relevance by reading.
@@ -115,7 +118,8 @@ questions, cover each part.
 2. Search in parallel. In a single turn, call semantic_search and keyword_search together, each \
 with several queries. You can call several tools in the same turn and they run concurrently. \
 Turns are the scarce resource, not tool calls.
-3. Read early. As soon as a blurb looks relevant, fetch it (and other promising chunks) in \
+3. Read the hits. If full-text hits already state the answer, answer right away and cite \
+them; there is no need to fetch them again. Otherwise fetch the promising blurb-only chunks in \
 the next turn, together with any follow-up searches. Don't re-run searches just to confirm a \
 blurb. Reading the chunk is the confirmation. Follow up with targeted searches only if \
 something is missing or the sources conflict.
@@ -182,6 +186,7 @@ class ResearchAgent:
     submission: Submission | None = None
     not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
+    shown: set[int] = field(default_factory=set)  # chunk ids whose full text the model has seen
     turns_used: int = 0
 
     def __post_init__(self) -> None:
@@ -301,11 +306,15 @@ class ResearchAgent:
                 task.cancel()
 
         # Every function call must get an output (in call order) so the conversation stays
-        # valid for later turns.
-        for (call, _, _), outcome in zip(parsed, outcomes):
-            assert outcome is not None
+        # valid for later turns. Search hits are trimmed across the whole turn (full text for
+        # the top hits, no repeats), so that happens once every call has finished.
+        outputs = registry.present(
+            [(call.name, outcome.output) for (call, _, _), outcome in zip(parsed, outcomes)],
+            self.shown,
+        )
+        for (call, _, _), output in zip(parsed, outputs):
             self.items.append(
-                {"type": "function_call_output", "call_id": call.call_id, "output": outcome.output}
+                {"type": "function_call_output", "call_id": call.call_id, "output": output}
             )
 
     async def _execute(self, call: Any, args: dict | None, parse_error: str | None) -> _CallOutcome:

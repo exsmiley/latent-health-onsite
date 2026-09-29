@@ -10,6 +10,8 @@ class SearchHit(BaseModel):
     section: str | None
     score: float  # higher is better (cosine similarity for semantic, ts_rank_cd for keyword)
     blurb: str  # first ~N words of the chunk text
+    text: str  # the full chunk text (the agent layer decides whether to show it)
+    token_count: int  # tiktoken count of `text`
 
 
 class QueryResults(BaseModel):

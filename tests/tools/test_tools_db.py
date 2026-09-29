@@ -9,7 +9,7 @@ from rag.tools.keyword import keyword_search
 from rag.tools.registry import dispatch
 from rag.tools.search import semantic_search
 
-from .conftest import ARTICLES, LONG_TEXT
+from .conftest import ARTICLES, CHUNKS, LONG_TEXT
 
 pytestmark = [pytest.mark.db, pytest.mark.usefixtures("tools_db")]
 
@@ -142,7 +142,12 @@ async def test_dispatch_semantic_compact_json(fake_embed):
         "section",
         "score",
         "blurb",
+        "text",
+        "token_count",
     }
+    hit = data[0]["hits"][0]
+    assert hit["text"] == CHUNKS[1][4]  # full text for the agent layer to show or trim
+    assert hit["token_count"] == len(CHUNKS[1][4].split())
 
 
 async def test_dispatch_keyword_default_top_k_and_string_args():
