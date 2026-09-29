@@ -65,12 +65,15 @@ question ──► Research agent (≤7 turns) ──submit_answer(answer, chunk
                ├─ supported ──► Responder ──stream──► user
                └─ not supported ──► back to Research agent with feedback (new 7-turn round)
                     after max_research_rounds (3): a fixed "couldn't find the answer" reply, no citations
+             report_not_found(reason) at any turn ──► fixed "couldn't find" reply, no evaluation
 ```
 
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
-  Tools: `semantic_search`, `keyword_search`, `fetch`, `submit_answer`. A *turn* is one model
-  call, which may emit several tool calls; these execute concurrently. On the last turn,
-  `tool_choice` is forced to `submit_answer`. The system prompt must explain that:
+  Tools: `semantic_search`, `keyword_search`, `fetch`, `submit_answer`, `report_not_found`. A
+  *turn* is one model call, which may emit several tool calls; these execute concurrently. On
+  the last turn, `tool_choice` is `allowed_tools` (required) over `submit_answer` and
+  `report_not_found`. The prompt says to give up after about two turns of focused searching
+  that find nothing and never to guess; `report_not_found` is rejected until a search has run. The system prompt must explain that:
   prefer fetching specific chunks over whole articles; **citations must be chunk ids**; the
   evaluator will only see cited chunk text and will not accept whole articles; cite the minimal
   sufficient set of chunks. `submit_answer` args: `{answer: str, citations: list[int]}`. On a

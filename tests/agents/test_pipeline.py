@@ -6,7 +6,7 @@ from fakes import Stream, ToolRecorder, fc, last_input_text, msg, resp, submit, 
 from rag.agents import orchestrator
 from rag.agents.evaluator import evaluate
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
-from rag.agents.research import SUBMIT_ANSWER
+from rag.agents.research import FINAL_TOOL_CHOICE, REPORT_NOT_FOUND, SUBMIT_ANSWER
 from rag.config import get_settings
 
 
@@ -96,8 +96,8 @@ async def test_happy_path(fake_env):
     assert len(calls) == 5
     model = get_settings().chat_model
     assert all(c["model"] == model for c in calls)
-    # Research calls: tools include submit_answer, tool_choice auto before the last turn.
-    assert [t["name"] for t in calls[0]["tools"]][-1] == SUBMIT_ANSWER
+    # Research calls: tools end with submit_answer and report_not_found; auto before last turn.
+    assert [t["name"] for t in calls[0]["tools"]][-2:] == [SUBMIT_ANSWER, REPORT_NOT_FOUND]
     assert calls[0]["tool_choice"] == "auto"
     # Turn 2's input carries turn 1's function calls and outputs, in call order.
     items = calls[1]["input"]
@@ -136,7 +136,7 @@ async def test_forced_submit_on_last_turn(fake_env):
     evs = await collect()
     research_calls = client.calls[:max_turns]
     assert all(c["tool_choice"] == "auto" for c in research_calls[:-1])
-    assert research_calls[-1]["tool_choice"] == {"type": "function", "name": SUBMIT_ANSWER}
+    assert research_calls[-1]["tool_choice"] == FINAL_TOOL_CHOICE
     assert "FINAL turn" in research_calls[-1]["input"][-1]["content"]
     turns = [s["turn"] for s in only(evs, "status") if s["stage"] == "research"]
     assert turns == list(range(1, max_turns + 1))
@@ -317,3 +317,69 @@ async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
     assert "verdict: SUPPORTED" in out
     assert "[1] Albert Einstein (chunk 101)" in out
     assert out.rstrip().endswith("Born 1879 [1].")
+
+
+def not_found(reason: str = "Searched Einstein's article; no pet is mentioned."):
+    return resp(fc(REPORT_NOT_FOUND, {"reason": reason}))
+
+
+async def test_not_found_ends_immediately_without_evaluation(fake_env):
+    client, _ = fake_env(
+        [resp(fc("semantic_search", {"queries": ["Einstein pet"], "top_k": None})), not_found()]
+    )
+    evs = await collect("What was Einstein's goldfish called?")
+    assert len(client.calls) == 2  # two research turns; no evaluator, no responder
+    assert only(evs, "evaluation") == []
+    assert only(evs, "research_answer")[0]["citations"] == []
+    assert "Not found" in only(evs, "research_answer")[0]["answer"]
+    assert only(evs, "citations") == [[]]
+    assert "".join(t["delta"] for t in only(evs, "token")) == NOT_FOUND_MESSAGE
+    assert types_of(evs)[-3:] == ["citations", "token", "done"]
+
+
+async def test_not_found_rejected_before_any_search(fake_env):
+    client, _ = fake_env(
+        [
+            not_found(),  # rejected: nothing searched yet, costs a turn
+            resp(fc("semantic_search", {"queries": ["Einstein pet"], "top_k": None})),
+            not_found(),
+        ]
+    )
+    evs = await collect()
+    results = [r for r in only(evs, "tool_result") if r["name"] == REPORT_NOT_FOUND]
+    assert [r["summary"] for r in results] == ["rejected: no searches yet", "reported not found"]
+    assert len(client.calls) == 3
+    assert "".join(t["delta"] for t in only(evs, "token")) == NOT_FOUND_MESSAGE
+
+
+async def test_not_found_after_rejected_answer_stops_retrying(fake_env):
+    client, _ = fake_env(
+        [
+            resp(fc("semantic_search", {"queries": ["Einstein pet"], "top_k": None})),
+            submit("Goldie.", [101]),
+            verdict("unsupported", "Not stated.", "No passage names a goldfish."),
+            not_found(),  # round 2, turn 1
+        ]
+    )
+    evs = await collect()
+    assert [e["verdict"] for e in only(evs, "evaluation")] == ["unsupported"]
+    assert len(client.calls) == 4
+    assert only(evs, "citations") == [[]]
+    assert "".join(t["delta"] for t in only(evs, "token")) == NOT_FOUND_MESSAGE
+
+
+async def test_submission_wins_over_not_found_in_same_turn(fake_env):
+    fake_env(
+        [
+            resp(fc("semantic_search", {"queries": ["q"], "top_k": None})),
+            resp(
+                fc(SUBMIT_ANSWER, {"answer": "Born 1879.", "citations": [101]}),
+                fc(REPORT_NOT_FOUND, {"reason": "unsure"}),
+            ),
+            verdict("supported"),
+            Stream(["Born 1879 [1]."]),
+        ]
+    )
+    evs = await collect()
+    assert [e["verdict"] for e in only(evs, "evaluation")] == ["supported"]
+    assert [c["chunk_id"] for c in only(evs, "citations")[0]] == [101]

@@ -54,6 +54,12 @@ async def run(question: str, history: list[dict] | None = None) -> AsyncIterator
                 yield ev
             sub = agent.submission
 
+            if agent.not_found is not None:
+                # The agent concluded the index doesn't have the answer: stop now, no evaluation.
+                yield events.research_answer(round_no, f"Not found: {agent.not_found}", [])
+                supported = False
+                break
+
             if sub is None:
                 reason = agent.last_error or "no valid submission"
                 yield events.evaluation(
