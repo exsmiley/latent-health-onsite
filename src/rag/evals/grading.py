@@ -106,6 +106,68 @@ answer.
 - correct=true implies partially_correct=false.
 Give a one or two sentence reason."""
 
+PREMISE_JUDGE_PROMPT = """\
+You grade answers from a question-answering system on questions that test how it handles a \
+false, ambiguous or unanswerable premise.
+
+You get a QUESTION, the EXPECTED BEHAVIOR, the PREMISE the question rests on, the EXPECTED \
+ANSWER (the key content of an ideal reply, with acceptable ALIASES), the question author's \
+NOTES (what a good vs bad response looks like) and the SYSTEM ANSWER.
+
+EXPECTED BEHAVIOR is one of:
+- correct_premise: the PREMISE is false. A correct reply says so (explicitly or by clearly \
+stating the contradicting fact) and gives the corrective facts in the expected answer, plus the \
+closest true answer where the expected answer has one. A reply that answers as if the premise \
+were true is WRONG, even if its other facts are right. A reply that only says the answer \
+couldn't be found, or refuses, is WRONG.
+- disambiguate: the question has several plausible referents. A correct reply covers the main \
+readings in the expected answer, or clearly picks the most likely one and names the \
+alternative. Answering a single reading with no sign of the other is partially correct unless \
+the NOTES say the dominant reading alone is enough. Mixing facts across referents is WRONG. A \
+reply that only says the answer couldn't be found is WRONG.
+- not_found: the sources do not contain the answer and the premise is NOT known to be false. \
+A correct reply says the information isn't available (it may add clearly related context, as \
+long as it doesn't present it as the answer). Any concrete answer is WRONG, and so is an \
+invented premise correction (e.g. claiming the thing never existed).
+
+Rules:
+- The expected answer and notes are the ground truth for this task, even if you believe the \
+real-world facts differ. Don't use outside knowledge to override them.
+- Ignore style, length, citation markers like [1] and hedging. Equivalent forms, spellings and \
+date formats count.
+- If the expected answer has several parts, correct needs every essential part (the NOTES say \
+which parts are optional). If some but not all essential parts are right, set \
+partially_correct to true and correct to false.
+- correct=true implies partially_correct=false.
+Give a one or two sentence reason."""
+
+PREMISE_BEHAVIORS = ("correct_premise", "disambiguate", "not_found")
+DECLINED_OUTCOMES = ("not_found", "out_of_turns")  # both end in the fixed "couldn't find" reply
+
+
+def premise_outcome_verdict(expected_behavior: str, outcome: str) -> dict | None:
+    """The verdict for a premise-tier question that needs no judge, or None to ask the judge.
+
+    A decline (not_found, or out_of_turns, which shows the same "couldn't find" reply) is
+    correct for `not_found` and wrong for `correct_premise`/`disambiguate`. Errors and timeouts
+    are always wrong. A supported answer always goes to the judge.
+    """
+    if outcome == "supported":
+        return None
+    if outcome in DECLINED_OUTCOMES and expected_behavior == "not_found":
+        return {
+            "correct": True,
+            "partially_correct": False,
+            "reason": f"declined ({outcome}) as expected; not sent to the judge",
+        }
+    why = (
+        f"bare 'couldn't find' ({outcome}) but the expected behavior is {expected_behavior}"
+        if outcome in DECLINED_OUTCOMES
+        else f"no answer ({outcome}); not sent to the judge"
+    )
+    return {"correct": False, "partially_correct": False, "reason": why}
+
+
 JUDGE_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -125,11 +187,23 @@ class Judgement(BaseModel):
 
 
 def judge_input(
-    question: str, answer: str, aliases: list[str], response: str, notes: str = ""
+    question: str,
+    answer: str,
+    aliases: list[str],
+    response: str,
+    notes: str = "",
+    expected_behavior: str | None = None,
+    premise: str | None = None,
 ) -> str:
     alias_text = "\n".join(f"- {a}" for a in aliases) or "(none)"
+    behavior = (
+        f"EXPECTED BEHAVIOR:\n{expected_behavior}\n\nPREMISE:\n{premise or '(none)'}\n\n"
+        if expected_behavior
+        else ""
+    )
     return (
         f"QUESTION:\n{question}\n\n"
+        f"{behavior}"
         f"EXPECTED ANSWER:\n{answer}\n\n"
         f"ALIASES:\n{alias_text}\n\n"
         f"NOTES:\n{notes.strip() or '(none)'}\n\n"
@@ -138,14 +212,23 @@ def judge_input(
 
 
 async def judge(
-    question: str, answer: str, aliases: list[str], response: str, notes: str = ""
+    question: str,
+    answer: str,
+    aliases: list[str],
+    response: str,
+    notes: str = "",
+    expected_behavior: str | None = None,
+    premise: str | None = None,
 ) -> Judgement:
-    """One strict-JSON call with `settings.chat_model`. Raises ValueError on an unusable reply."""
+    """One strict-JSON call with `settings.chat_model`. Raises ValueError on an unusable reply.
+
+    With `expected_behavior` (premise tier) the judge uses PREMISE_JUDGE_PROMPT and also sees
+    the behavior and the premise.
+    """
+    content = judge_input(question, answer, aliases, response, notes, expected_behavior, premise)
     result: Any = await model.create(
-        instructions=JUDGE_PROMPT,
-        input=[
-            {"role": "user", "content": judge_input(question, answer, aliases, response, notes)}
-        ],
+        instructions=PREMISE_JUDGE_PROMPT if expected_behavior else JUDGE_PROMPT,
+        input=[{"role": "user", "content": content}],
         text={
             "format": {
                 "type": "json_schema",

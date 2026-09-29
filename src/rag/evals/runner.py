@@ -25,6 +25,7 @@ EVALS_DIR = ROOT / "evals"
 SETS: dict[str, Path] = {
     "main": EVALS_DIR / "questions.jsonl",
     "super_hard": EVALS_DIR / "questions_super_hard.jsonl",
+    "premise": EVALS_DIR / "questions_premise.jsonl",
 }
 DEFAULT_OUT = EVALS_DIR / "results"
 OUTCOMES = ("supported", "not_found", "out_of_turns", "error", "timeout")
@@ -73,7 +74,7 @@ def load_questions(
     limit: int | None = None,
     warn: Callable[[str], None] = lambda m: print(m, file=sys.stderr),
 ) -> list[dict]:
-    """Questions from `file`, or from the named set ("main", "super_hard" or "all").
+    """Questions from `file`, or from the named set ("main", "super_hard", "premise" or "all").
 
     Each question gets `_set` (the set it came from). `tier` defaults to that set name.
     """
@@ -85,7 +86,7 @@ def load_questions(
     elif set_name in SETS:
         sources = [(set_name, SETS[set_name])]
     else:
-        raise ValueError(f"unknown set {set_name!r}; use main, super_hard or all")
+        raise ValueError(f"unknown set {set_name!r}; use {', '.join(SETS)} or all")
 
     questions: list[dict] = []
     for name, path in sources:
@@ -185,6 +186,10 @@ async def run_question(
         "expected_answer": q.get("answer", ""),
         "answer_aliases": q.get("answer_aliases", []),
     }
+    behavior = q.get("expected_behavior")  # premise tier only
+    if behavior is not None:
+        rec["expected_behavior"] = behavior
+        rec["premise"] = q.get("premise")
     events: dict[str, list] = {
         "research_answers": [],
         "evaluations": [],
@@ -325,17 +330,28 @@ async def run_question(
             rec["error"] = (rec["error"] + "; " if rec["error"] else "") + f"citation lookup: {exc}"
     rec["citations"] = cited
 
-    # Grading
+    # Grading. For the premise tier the outcome alone can decide (a decline is right for
+    # not_found and wrong otherwise), exact match is only a diagnostic, and the judge gets the
+    # expected behavior and the premise.
     exp_answer, aliases = rec["expected_answer"], rec["answer_aliases"]
     exact = supported and grading.exact_match(exp_answer, aliases, final_answer)
     judgement: dict | None = None
     judge_usage: dict | None = None
-    if judge:
+    decided = grading.premise_outcome_verdict(behavior, outcome) if behavior else None
+    if decided is not None:
+        judgement = decided
+    elif judge:
         if supported and final_answer.strip():
             with track_usage() as ju:
                 try:
                     j = await grading.judge(
-                        q["question"], exp_answer, aliases, final_answer, q.get("notes", "")
+                        q["question"],
+                        exp_answer,
+                        aliases,
+                        final_answer,
+                        q.get("notes", ""),
+                        expected_behavior=behavior,
+                        premise=q.get("premise"),
                     )
                     judgement = j.model_dump()
                 except Exception as exc:  # noqa: BLE001 - fall back to exact match
@@ -349,9 +365,16 @@ async def run_question(
             }
     if judgement is not None and "correct" in judgement:
         correct, partial = judgement["correct"], judgement["partially_correct"]
-        method = "judge" if judge_usage is not None else "no_answer"
+        if judge_usage is not None:
+            method = "judge"
+        elif decided is not None:
+            method = "outcome"
+        else:
+            method = "no_answer"
     else:
-        correct, partial = exact, False
+        # no judge (or it failed): exact match, except that a supported answer to a not_found
+        # question is never correct
+        correct, partial = exact and behavior != "not_found", False
         method = "exact"
     recall, overlap, article_recall, precision = grading.citation_recall(
         [c for c in q.get("supporting_chunks", []) if "chunk_index" in c],

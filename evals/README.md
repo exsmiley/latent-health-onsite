@@ -1,11 +1,12 @@
 # Evaluation question set
 
-There are two files:
+There are three files:
 
 | file | questions | purpose |
 |---|---:|---|
 | `questions.jsonl` | 81 | Main set: hard, mostly 2–3 hop questions that should be solvable within the production 7-turn budget |
 | `questions_super_hard.jsonl` | 29 | [Super-hard tier](#super-hard-tier): 6–8 step chains and 10–14 article fan-outs, built to find the breaking point |
+| `questions_premise.jsonl` | 30 | [Premise tier](#premise-tier): false premises, ambiguous names and truly unanswerable controls, which test *how* the system answers, not only what |
 
 The rest of this section and the next few describe the main set.
 
@@ -104,7 +105,7 @@ the dominant reasoning operation.
 ## Validation
 
 ```
-uv run python evals/validate.py [path ...]   # defaults to both questions.jsonl and questions_super_hard.jsonl
+uv run python evals/validate.py [path ...]   # defaults to all three question files
 ```
 
 The script checks that:
@@ -113,14 +114,18 @@ The script checks that:
 - super-hard questions have `tier`, `sequential_depth`, `breadth` and `min_turns_estimate`, with
   `1 <= sequential_depth <= hops`, `min_turns_estimate >= sequential_depth`, and `breadth` equal
   to the number of distinct `article_id`s in `supporting_chunks`;
+- premise questions have a premise `type`, the matching `expected_behavior`
+  (`false_premise` → `correct_premise`, `ambiguous` → `disambiguate`, `unanswerable` →
+  `not_found`), a non-empty `premise` and non-empty `notes`, and a main-set `difficulty`. Only
+  `unanswerable` questions may have empty `supporting_chunks`;
 - every supporting chunk exists with the recorded `article_id`, `chunk_index` and `title` (a
   `section` mismatch is only a warning);
 - each `evidence` string appears in that chunk's text after whitespace normalization.
 
 For each file it prints counts by type, difficulty and hops. For the super-hard tier it prints
-counts by type and the distributions of hops, depth, breadth and `min_turns_estimate`. It exits
-non-zero on any error and only runs SELECTs. Both files currently pass with 0 errors and 0
-warnings.
+counts by type and the distributions of hops, depth, breadth and `min_turns_estimate`, and for
+the premise tier the counts by type and behavior. It exits non-zero on any error and only runs
+SELECTs. All three files currently pass with 0 errors and 0 warnings.
 
 ## Super-hard tier
 
@@ -216,6 +221,96 @@ from its own knowledge can beat it; an agent that searches badly will exceed it.
   Stalin) without searching. Every hop still needs a retrieved chunk as evidence for a supported
   answer.
 
+## Premise tier
+
+`questions_premise.jsonl` (ids `pr001`–`pr030`) measures what the system does when the question
+itself is the problem. It comes from a real failure: asked *"who is the prince of
+Azerbaijian?"*, the research agent first answered correctly (Azerbaijan is a republic whose head
+of state is President Ilham Aliyev, so there is no prince), but the evaluator rejected the
+negative claim and the user got "couldn't find". The agent also never found the historical
+meaning: the Qajar crown princes of Iran governed the Iranian province of Azerbaijan (Abbas
+Mirza; Mozaffar ad-Din from 1861). The ideal reply corrects the premise **and** gives that
+history. That question is pr001, verbatim with its typo.
+
+It was built like the other sets: every question was written from chunk text read in the DB,
+with `evidence` recorded and chunk metadata filled from the DB. For each unanswerable control
+the fact was checked to be absent with several keyword and semantic searches plus a scan of the
+relevant article(s) (the searches are listed in `reasoning`).
+
+### Extra fields
+
+| field | meaning |
+|---|---|
+| `tier` | Always `"premise"` |
+| `type` | `false_premise`, `ambiguous` or `unanswerable` |
+| `expected_behavior` | `correct_premise`, `disambiguate` or `not_found` (one per type, in that order) |
+| `premise` | Short statement of the false or ambiguous assumption |
+| `answer` | The key content of the ideal reply (the correction, the readings, or "not in the corpus") |
+| `supporting_chunks` | Evidence for the correcting or disambiguating facts; empty for `unanswerable` |
+| `notes` | What a good vs bad response looks like, which parts are optional, and known traps |
+
+`hops` and `difficulty` (`easy`/`medium`/`hard`) are kept.
+
+### Types
+
+- **false_premise** (12, `correct_premise`): the question presupposes something the corpus
+  contradicts: a monarch of a republic (Azerbaijan, Switzerland, France), a president of a
+  monarchy (Canada), the wrong prize or reason (Curie's "Literature" Nobel, Einstein's Nobel
+  "for relativity"), the wrong inventor or place (Edison's telephone, the Titanic in the
+  Pacific, Armstrong on Mars), a wrong event date (the Berlin Wall "torn down in 1961"), a
+  reclassified category (Pluto as "the smallest planet") or a relation that never existed
+  (Newton and Einstein working together). A correct reply says the premise is false, gives the
+  corpus facts and, where there is one, the closest true answer (Bell in 1876; Mercury; the
+  Moon and "one small step").
+- **ambiguous** (10, `disambiguate`): the name has several referents that are all in the
+  corpus: Georgia (country/U.S. state), the two Congos, Presidents Johnson and Bush, Popes John
+  Paul I/II, Queen Elizabeth I/II, Birmingham, Paris, Punjab (India/Pakistan) and Victoria. A
+  correct reply covers the main readings, or picks the likeliest and names the alternative. One
+  reading with no hint of the other is partially correct, except where `notes` say the dominant
+  reading is enough (Paris, pr018).
+- **unanswerable** (8, `not_found`): controls where "couldn't find" IS the right answer: the
+  premise is plausible but the corpus doesn't have the fact (Einstein's goldfish, Napoleon's
+  shoe size, Curie's blood type, Lincoln's Gettysburg breakfast, Newton's favourite food,
+  Mozart's favourite colour, Caesar's height, Pelé's first teacher). They make sure a fix for
+  false premises doesn't start inventing answers or corrections. Several have a nearby trap in
+  the corpus (Einstein's compass, Newton's apple, Curie's anemia, Lincoln's morning ride), noted
+  in `notes`.
+
+| type | n | easy | medium | hard | hops |
+|---|---:|---:|---:|---:|---|
+| false_premise | 12 | 6 | 5 | 1 | 1: 2, 2: 8, 3: 1, 4: 1 |
+| ambiguous | 10 | 4 | 6 | 0 | 1: 1, 2: 9 |
+| unanswerable | 8 | 0 | 8 | 0 | 1: 8 |
+
+### Grading this tier
+
+The outcome decides first, without the judge:
+- `not_found` (and `out_of_turns`, which shows the user the same fixed "couldn't find" reply) is
+  **correct** for `not_found` questions and **wrong** for `correct_premise` and `disambiguate`
+  questions: a bare "couldn't find" is exactly the failure this tier exists to catch.
+- `error` and `timeout` are wrong.
+
+A supported answer goes to the judge with a premise-specific prompt (`PREMISE_JUDGE_PROMPT` in
+`src/rag/evals/grading.py`) that also sees `expected_behavior`, `premise` and `notes`. Answering
+as if the premise were true is wrong; for `not_found` questions any concrete answer or invented
+correction ("Einstein never had a goldfish") is wrong. Exact match is still recorded but does
+not count toward correctness (the ideal replies are prose corrections). Without the judge
+(`--no-judge`, or a failed judge call) a supported answer falls back to exact match, and is
+always wrong for a `not_found` question. `grading.method` is `outcome` when the outcome decided.
+
+The summary adds a `by expected_behavior` table for this tier, and `eval-compare` a section per
+behavior.
+
+### Premise caveats
+
+- **Snapshot:** the corpus is March 2022: Canada's head of state is Queen Elizabeth II and
+  Switzerland's listed president is from 2020. The expected answers follow the corpus.
+- **Conflicting dates:** the Einstein article gives his Nobel as 1921 in the lead and 1922 in
+  "Later life"; either is accepted (pr003). Both Pope John Paul articles call their pope the
+  "264th".
+- **Evidence from a date page:** "Ilham Aliyev becomes President of Azerbaijan" is recorded from
+  the "October 15" page (chunk 15565), alongside the Ilham Aliyev article.
+
 ## Benchmarking requirements
 
 These are the requirements the eval runner was built against (see [Running the
@@ -275,6 +370,7 @@ stage, counts tokens and grades each answer. It needs the DB and `OPENAI_API_KEY
 uv run rag eval --set main --limit 5 --label smoke        # quick check
 uv run rag eval --set main --label baseline-7turns         # the full main set
 uv run rag eval --set super_hard --max-turns 15 --label sh-15
+uv run rag eval --set premise --label premise                # false premise / ambiguous / unanswerable
 uv run rag eval --ids q001,q017 --no-judge                 # a few questions, exact match only
 uv run rag eval-compare evals/results/A.jsonl evals/results/B.jsonl
 ```
@@ -283,7 +379,7 @@ uv run rag eval-compare evals/results/A.jsonl evals/results/B.jsonl
 
 | option | default | meaning |
 |---|---|---|
-| `--set` | `main` | `main` (`questions.jsonl`), `super_hard` (`questions_super_hard.jsonl`) or `all` |
+| `--set` | `main` | `main` (`questions.jsonl`), `super_hard` (`questions_super_hard.jsonl`), `premise` (`questions_premise.jsonl`) or `all` |
 | `--file` | | any question JSONL (overrides `--set`) |
 | `--ids`, `--limit` | | select questions by id / keep the first N |
 | `--max-turns` | `research_max_turns` (7) | research-turn budget for this run |
@@ -312,7 +408,8 @@ Each run writes two files to `evals/results/` (git-ignored):
     `judge_usage` is counted separately.
   - `grading`: `exact`, `judge` (`{correct, partially_correct, reason}`), `correct` (the judge's
     verdict, or `exact` with `--no-judge` or if the judge call fails), `method` (`judge`,
-    `exact`, or `no_answer` when there was no answer to judge), `partially_correct`,
+    `exact`, `no_answer` when there was no answer to judge, or `outcome` when the premise tier
+    decided from the outcome alone), `partially_correct`,
     `citation_recall`, `citation_precision`, `citation_any_overlap` and
     `citation_article_recall`.
 - `<same stem>.summary.json`: the run config (set, max_turns, concurrency, timeout, model names,
@@ -322,8 +419,9 @@ Each run writes two files to `evals/results/` (git-ignored):
 
 The printed table has one row per question `type` within each tier (`main`, or the `tier` field
 of super-hard questions), plus an `ALL` row. A tier with several difficulties also gets a table
-by `difficulty`, and the super-hard tier gets tables by `sequential_depth` and by
-`min_turns_estimate` (the breaking-point curve).
+by `difficulty`, the super-hard tier gets tables by `sequential_depth` and by
+`min_turns_estimate` (the breaking-point curve), and the premise tier gets a table by
+`expected_behavior`.
 
 - `acc`: final correctness (the judge). `exact`: normalized exact match. `part`: the judge's
   partially-correct rate (some parts of a multi-part answer right).
@@ -348,7 +446,8 @@ same concurrency.
 - *Judge*: `settings.chat_model` with a strict JSON schema. It sees the question, the expected
   answer, the aliases, the question's `notes` and the final answer, and judges factual
   agreement with the expected answer only, not style. Not-found replies, errors and timeouts
-  are wrong without a judge call. Every supported answer is judged (not only exact-match
+  are wrong without a judge call (the premise tier differs; see [Grading this
+  tier](#grading-this-tier)). Every supported answer is judged (not only exact-match
   misses), so `exact` and the judge can be compared; exact match undercounts list answers
   written in prose, e.g. "Corsica, Elba and Saint Helena".
 - *Citation recall* matches cited chunks to `supporting_chunks` on `(article_id, chunk_index)`.

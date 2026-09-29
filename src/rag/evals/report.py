@@ -125,6 +125,10 @@ def summarize(records: list[dict]) -> dict:
             "all": group_stats(recs),
             "by_type": {t: group_stats(rs) for t, rs in _by(recs, "type").items()},
         }
+        if any(r.get("expected_behavior") for r in recs):
+            entry["by_expected_behavior"] = {
+                b: group_stats(rs) for b, rs in _by(recs, "expected_behavior").items()
+            }
         if len({r.get("difficulty") for r in recs}) > 1:
             entry["by_difficulty"] = {
                 d: group_stats(rs) for d, rs in _by(recs, "difficulty").items()
@@ -153,6 +157,7 @@ def summarize(records: list[dict]) -> dict:
                 "id": r["id"],
                 "tier": r.get("tier"),
                 "type": r.get("type"),
+                "expected_behavior": r.get("expected_behavior"),
                 "outcome": r.get("outcome"),
                 "partially_correct": _g(r).get("partially_correct"),
                 "expected": r.get("expected_answer"),
@@ -222,6 +227,7 @@ def render(records: list[dict], summary: dict, config: dict | None = None) -> st
             lines.append(_row(t, s))
         lines.append(_row("ALL", entry["all"]))
         for key, prefix in (
+            ("expected_behavior", ""),
             ("difficulty", ""),
             ("sequential_depth", "depth="),
             ("min_turns_estimate", "min_turns="),
@@ -264,6 +270,8 @@ def render(records: list[dict], summary: dict, config: dict | None = None) -> st
     for w in summary["wrong"]:
         tag = "PARTIAL" if w["partially_correct"] else w["outcome"]
         lines.append(f"  {w['id']:<8} [{w['type']}] {tag}: expected {_short(w['expected'], 60)!r}")
+        if w.get("expected_behavior"):
+            lines.append(f"           expected behavior: {w['expected_behavior']}")
         if w["outcome"] == "supported" or w["outcome"] in ("error", "timeout"):
             lines.append(f"           got: {_short(w['got'], 110)}")
         if w["judge_reason"] and w["outcome"] == "supported":
@@ -333,6 +341,13 @@ def compare(a: list[dict], b: list[dict], name_a: str = "A", name_b: str = "B") 
         rb = [r for r in b_c if str(r.get("tier")) == tier]
         if len(tiers) > 1:
             section(f"tier {tier}", ra, rb)
+        behaviors = sorted({str(r["expected_behavior"]) for r in ra if r.get("expected_behavior")})
+        for beh in behaviors:
+            section(
+                f"tier {tier} / behavior {beh}",
+                [r for r in ra if str(r.get("expected_behavior")) == beh],
+                [r for r in rb if str(r.get("expected_behavior")) == beh],
+            )
         for t in sorted({str(r.get("type")) for r in ra}):
             section(
                 f"tier {tier} / {t}",
