@@ -1,0 +1,518 @@
+{
+ "started": "2026-09-29T21:14:58+00:00",
+ "url": "http://127.0.0.1:8300",
+ "label": "ramp",
+ "config": {
+  "levels": [
+   1,
+   2,
+   4,
+   8,
+   16,
+   32,
+   64
+  ],
+  "requests_per_level": null,
+  "timeout": 300.0,
+  "seed": 0,
+  "max_error_rate": 0.2,
+  "p50_factor": 4.0,
+  "questions": "evals/questions.jsonl",
+  "server_log": "evals/results/stress/server.log"
+ },
+ "levels": [
+  {
+   "level": 1,
+   "requests": 8,
+   "completed": 8,
+   "wall_s": 84.565,
+   "throughput_per_min": 5.68,
+   "total_s": {
+    "p50": 10.52,
+    "p90": 12.67,
+    "p99": 14.17
+   },
+   "ttft_s": {
+    "p50": 10.058,
+    "p90": 12.185,
+    "p99": 13.578
+   },
+   "first_event_s": {
+    "p50": 0.003,
+    "p90": 0.011,
+    "p99": 0.026
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 8,
+    "not_found": 0,
+    "out_of_turns": 0
+   },
+   "turns_mean": 3.12,
+   "error_samples": [],
+   "t_start_s": 0.14,
+   "t_end_s": 84.7,
+   "server_log": {
+    "openai_requests": 51,
+    "openai_by_endpoint": {
+     "responses": 41,
+     "embeddings": 10
+    },
+    "openai_status": {
+     "200": 51
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 72,
+     "peak_in_use": 3,
+     "peak_waiting": 2,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 77,
+    "pg_total_peak": 13,
+    "pg_active_peak": 3,
+    "server_db_conns_peak": 4,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 1.0,
+    "server_cpu_pct_peak": 9.9,
+    "server_rss_mb_peak": 104.4
+   }
+  },
+  {
+   "level": 2,
+   "requests": 8,
+   "completed": 8,
+   "wall_s": 47.721,
+   "throughput_per_min": 10.06,
+   "total_s": {
+    "p50": 10.687,
+    "p90": 13.885,
+    "p99": 18.757
+   },
+   "ttft_s": {
+    "p50": 10.302,
+    "p90": 13.428,
+    "p99": 18.385
+   },
+   "first_event_s": {
+    "p50": 0.002,
+    "p90": 0.005,
+    "p99": 0.006
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 8,
+    "not_found": 0,
+    "out_of_turns": 0
+   },
+   "turns_mean": 3.62,
+   "error_samples": [],
+   "t_start_s": 84.7,
+   "t_end_s": 132.43,
+   "server_log": {
+    "openai_requests": 57,
+    "openai_by_endpoint": {
+     "responses": 46,
+     "embeddings": 11
+    },
+    "openai_status": {
+     "200": 57
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 84,
+     "peak_in_use": 4,
+     "peak_waiting": 2,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 43,
+    "pg_total_peak": 19,
+    "pg_active_peak": 4,
+    "server_db_conns_peak": 5,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 1.1,
+    "server_cpu_pct_peak": 3.7,
+    "server_rss_mb_peak": 105.7
+   }
+  },
+  {
+   "level": 4,
+   "requests": 8,
+   "completed": 8,
+   "wall_s": 28.738,
+   "throughput_per_min": 16.7,
+   "total_s": {
+    "p50": 11.916,
+    "p90": 15.845,
+    "p99": 19.913
+   },
+   "ttft_s": {
+    "p50": 11.239,
+    "p90": 15.5,
+    "p99": 19.584
+   },
+   "first_event_s": {
+    "p50": 0.004,
+    "p90": 0.006,
+    "p99": 0.006
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 8,
+    "not_found": 0,
+    "out_of_turns": 0
+   },
+   "turns_mean": 3.88,
+   "error_samples": [],
+   "t_start_s": 132.43,
+   "t_end_s": 161.16,
+   "server_log": {
+    "openai_requests": 60,
+    "openai_by_endpoint": {
+     "responses": 49,
+     "embeddings": 11
+    },
+    "openai_status": {
+     "200": 60
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 85,
+     "peak_in_use": 3,
+     "peak_waiting": 1,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 26,
+    "pg_total_peak": 19,
+    "pg_active_peak": 2,
+    "server_db_conns_peak": 5,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 1.9,
+    "server_cpu_pct_peak": 5.5,
+    "server_rss_mb_peak": 106.5
+   }
+  },
+  {
+   "level": 8,
+   "requests": 16,
+   "completed": 16,
+   "wall_s": 28.344,
+   "throughput_per_min": 33.87,
+   "total_s": {
+    "p50": 10.255,
+    "p90": 17.528,
+    "p99": 19.469
+   },
+   "ttft_s": {
+    "p50": 9.705,
+    "p90": 17.045,
+    "p99": 19.035
+   },
+   "first_event_s": {
+    "p50": 0.004,
+    "p90": 0.008,
+    "p99": 0.008
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 16,
+    "not_found": 0,
+    "out_of_turns": 0
+   },
+   "turns_mean": 3.38,
+   "error_samples": [],
+   "t_start_s": 161.16,
+   "t_end_s": 189.51,
+   "server_log": {
+    "openai_requests": 109,
+    "openai_by_endpoint": {
+     "responses": 86,
+     "embeddings": 23
+    },
+    "openai_status": {
+     "200": 109
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 175,
+     "peak_in_use": 5,
+     "peak_waiting": 1,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 25,
+    "pg_total_peak": 19,
+    "pg_active_peak": 5,
+    "server_db_conns_peak": 5,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 3.6,
+    "server_cpu_pct_peak": 7.3,
+    "server_rss_mb_peak": 107.7
+   }
+  },
+  {
+   "level": 16,
+   "requests": 32,
+   "completed": 32,
+   "wall_s": 30.663,
+   "throughput_per_min": 62.62,
+   "total_s": {
+    "p50": 9.581,
+    "p90": 14.57,
+    "p99": 17.519
+   },
+   "ttft_s": {
+    "p50": 9.12,
+    "p90": 13.328,
+    "p99": 17.154
+   },
+   "first_event_s": {
+    "p50": 0.011,
+    "p90": 0.027,
+    "p99": 0.028
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 32,
+    "not_found": 0,
+    "out_of_turns": 0
+   },
+   "turns_mean": 3.22,
+   "error_samples": [],
+   "t_start_s": 189.51,
+   "t_end_s": 220.17,
+   "server_log": {
+    "openai_requests": 204,
+    "openai_by_endpoint": {
+     "responses": 168,
+     "embeddings": 36
+    },
+    "openai_status": {
+     "200": 204
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 1,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 282,
+     "peak_in_use": 6,
+     "peak_waiting": 4,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 28,
+    "pg_total_peak": 22,
+    "pg_active_peak": 3,
+    "server_db_conns_peak": 7,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 6.0,
+    "server_cpu_pct_peak": 12.8,
+    "server_rss_mb_peak": 110.4
+   }
+  },
+  {
+   "level": 32,
+   "requests": 64,
+   "completed": 64,
+   "wall_s": 53.221,
+   "throughput_per_min": 72.15,
+   "total_s": {
+    "p50": 10.486,
+    "p90": 16.168,
+    "p99": 32.238
+   },
+   "ttft_s": {
+    "p50": 9.981,
+    "p90": 15.755,
+    "p99": 31.654
+   },
+   "first_event_s": {
+    "p50": 0.01,
+    "p90": 0.038,
+    "p99": 0.039
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 61,
+    "not_found": 2,
+    "out_of_turns": 1
+   },
+   "turns_mean": 3.47,
+   "error_samples": [],
+   "t_start_s": 220.17,
+   "t_end_s": 273.39,
+   "server_log": {
+    "openai_requests": 434,
+    "openai_by_endpoint": {
+     "responses": 348,
+     "embeddings": 86
+    },
+    "openai_status": {
+     "200": 434
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 650,
+     "peak_in_use": 9,
+     "peak_waiting": 1,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 48,
+    "pg_total_peak": 21,
+    "pg_active_peak": 1,
+    "server_db_conns_peak": 10,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 6.3,
+    "server_cpu_pct_peak": 20.9,
+    "server_rss_mb_peak": 116.3
+   }
+  },
+  {
+   "level": 64,
+   "requests": 128,
+   "completed": 128,
+   "wall_s": 50.464,
+   "throughput_per_min": 152.19,
+   "total_s": {
+    "p50": 10.934,
+    "p90": 16.409,
+    "p99": 27.181
+   },
+   "ttft_s": {
+    "p50": 10.505,
+    "p90": 16.081,
+    "p99": 26.767
+   },
+   "first_event_s": {
+    "p50": 0.016,
+    "p90": 0.049,
+    "p99": 0.05
+   },
+   "error_rate": 0.0,
+   "errors": {
+    "error_event": 0,
+    "http_error": 0,
+    "timeout": 0,
+    "transport": 0,
+    "incomplete": 0
+   },
+   "outcomes": {
+    "supported": 126,
+    "not_found": 1,
+    "out_of_turns": 1
+   },
+   "turns_mean": 3.33,
+   "error_samples": [],
+   "t_start_s": 273.4,
+   "t_end_s": 323.86,
+   "server_log": {
+    "openai_requests": 852,
+    "openai_by_endpoint": {
+     "responses": 682,
+     "embeddings": 170
+    },
+    "openai_status": {
+     "200": 852
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "retries": 0,
+    "tracebacks": 0,
+    "pool": {
+     "requests": 1290,
+     "peak_in_use": 13,
+     "peak_waiting": 13,
+     "queued": 0,
+     "saturated": false
+    }
+   },
+   "server": {
+    "samples": 46,
+    "pg_total_peak": 27,
+    "pg_active_peak": 6,
+    "server_db_conns_peak": 14,
+    "pool_saturated": false,
+    "server_cpu_pct_avg": 11.3,
+    "server_cpu_pct_peak": 39.1,
+    "server_rss_mb_peak": 126.7
+   }
+  }
+ ],
+ "stopped_early": null,
+ "baseline_p50_s": 10.52,
+ "monitor_notes": []
+}
