@@ -57,7 +57,7 @@ async def run(question: str, history: list[dict] | None = None) -> AsyncIterator
             yield events.status(
                 "evaluate", turn, max_turns, "Checking the answer against the cited sources"
             )
-            evaluation = await evaluate(question, sub.answer, sub.chunks)
+            evaluation = await evaluate(sub.question, sub.answer, sub.chunks)
             yield events.evaluation(
                 turn, evaluation.verdict, evaluation.independent_answer, evaluation.feedback
             )

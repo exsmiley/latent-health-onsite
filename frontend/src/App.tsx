@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isMockMode, streamChat } from "./api";
 import { AssistantMessage } from "./components/AssistantMessage";
+import { toHistory } from "./history";
 import { initialAssistantState, reduce, type AssistantState } from "./trace";
-import type { ChatEvent, ChatMessage } from "./types";
+import type { ChatEvent } from "./types";
 
 interface Exchange {
   id: number;
@@ -15,16 +16,6 @@ const EXAMPLES = [
   "Why is the sky blue?",
   "Who was Ada Lovelace?",
 ];
-
-/** Conversation history for the API: questions plus final answer text only (never the trace). */
-function toHistory(exchanges: Exchange[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  for (const ex of exchanges) {
-    out.push({ role: "user", content: ex.question });
-    if (ex.assistant.text.trim()) out.push({ role: "assistant", content: ex.assistant.text });
-  }
-  return out;
-}
 
 export default function App() {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);

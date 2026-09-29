@@ -7,7 +7,7 @@ the research answer.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from rag.agents import model
 from rag.tools.models import Chunk
@@ -105,6 +105,16 @@ async def evaluate(question: str, answer: str, chunks: list[Chunk]) -> Evaluatio
         },
     )
     raw = response.output_text
-    if not raw:
-        raise model.ModelError("The evaluator returned no output (possibly a refusal).")
-    return Evaluation.model_validate_json(raw)
+    try:
+        return Evaluation.model_validate_json(raw)
+    except ValidationError:
+        # Empty output, a refusal or malformed JSON: count it as unverified rather than failing
+        # the whole request, so the research agent can re-check and reply again.
+        return Evaluation(
+            independent_answer="",
+            verdict="unsupported",
+            feedback=(
+                "The answer could not be verified (the checker returned no usable verdict). "
+                "Make sure your cited chunks state the answer explicitly, then reply again."
+            ),
+        )

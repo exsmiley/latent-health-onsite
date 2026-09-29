@@ -421,3 +421,82 @@ async def test_run_cli_prints_trace(fake_env, monkeypatch, capsys):
     assert "[1] Albert Einstein (chunk 101)" in out
     assert out.rstrip().endswith("Born 1879 [1].")
     assert "round" not in out
+
+
+async def test_evaluator_gets_standalone_question_for_follow_ups(fake_env):
+    history = [
+        {"role": "user", "content": "Who was Albert Einstein?"},
+        {"role": "assistant", "content": "A German-born physicist [1]."},
+    ]
+    client, _ = fake_env(
+        [
+            final(
+                {
+                    "question": "When was Albert Einstein born?",
+                    "status": "answered",
+                    "answer": "14 March 1879.",
+                    "citations": [101],
+                    "reason": "",
+                }
+            ),
+            verdict("supported"),
+            Stream(["14 March 1879 [1]."]),
+        ]
+    )
+    evs = await collect("When was he born?", history)
+    ev_text = last_input_text(client.calls[1])
+    assert "QUESTION:\nWhen was Albert Einstein born?" in ev_text
+    assert "When was he born?" not in ev_text
+    assert "Who was Albert Einstein" not in ev_text  # still no history for the evaluator
+    assert only(evs, "outcome")[0]["result"] == "supported"
+    assert "question" in ANSWER_SCHEMA["required"]
+
+
+async def test_citation_check_failure_is_retryable_not_fatal(fake_env, monkeypatch):
+    from fakes import fake_fetch
+
+    from rag.tools import fetch as fetch_tool
+
+    fake_env(
+        [
+            search(),
+            answer("1879", [101]),
+            answer("1879", [101]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    calls = {"n": 0}
+
+    async def flaky_fetch(chunk_ids=(), article_ids=()):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("pool timeout")
+        return await fake_fetch(list(chunk_ids), list(article_ids))
+
+    monkeypatch.setattr(fetch_tool, "fetch", flaky_fetch)
+    evs = await collect()
+    answers = only(evs, "research_answer")
+    assert [a["status"] for a in answers] == ["invalid", "answered"]
+    assert "temporary error (ConnectionError)" in answers[0]["reason"]
+    assert only(evs, "error") == []
+    assert only(evs, "outcome")[0] == {"result": "supported", "turns_used": 3}
+
+
+@pytest.mark.parametrize("raw", ["", "not json", '{"verdict": "maybe"}'])
+async def test_unusable_evaluator_output_counts_as_unsupported(fake_env, raw):
+    client, _ = fake_env(
+        [
+            answer("1879", [101]),
+            resp(msg(raw)),  # evaluator: empty / refusal-like / malformed
+            answer("1879", [101]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ]
+    )
+    evs = await collect()
+    evals = only(evs, "evaluation")
+    assert [e["verdict"] for e in evals] == ["unsupported", "supported"]
+    assert "could not be verified" in evals[0]["feedback"]
+    assert only(evs, "error") == []
+    assert "could not be verified" in last_input_text(client.calls[2])

@@ -79,8 +79,10 @@ out of turns ──► fixed "couldn't find" reply
 - **Research agent** (`rag.agents.research`). Model `settings.chat_model` via the Responses API.
   Tools: `semantic_search`, `keyword_search`, `fetch`, always with `tool_choice: "auto"`: it is
   never forced to answer. It ends research by replying WITHOUT a tool call. That final message
-  must match the strict JSON schema `{status: "answered" | "not_found", answer: str,
-  citations: int[], reason: str}`, set via the Responses API `text.format`. For "answered",
+  must match the strict JSON schema `{question: str, status: "answered" | "not_found", answer:
+  str, citations: int[], reason: str}`, set via the Responses API `text.format`. `question` is
+  the user's latest question rewritten to stand alone (pronouns and follow-up references
+  resolved). The evaluator is given this question, never the chat history. For "answered",
   `answer` and chunk-id `citations` are required and `reason` is ""; for "not_found", `reason`
   says what was searched and what was missing, and `answer`/`citations` are empty. It may
   answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
@@ -100,8 +102,10 @@ out of turns ──► fixed "couldn't find" reply
   summary "not run: no turns left".
 - **Evaluator** (`rag.agents.evaluator`). A single model call, with structured JSON output
   `{independent_answer: str, verdict: "supported" | "unsupported", feedback: str}`. It answers
-  the question from the cited chunk texts alone, then judges whether that answer agrees with the
-  research agent's answer. The feedback says what's missing or contradicted. "Not found"-style
+  the (standalone) question from the cited chunk texts alone, then judges whether that answer agrees with the
+  research agent's answer. The feedback says what's missing or contradicted. An empty or malformed
+  evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
+  is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.
 - **Responder** (`rag.agents.responder`). A streaming model call that takes the question, the
   research answer, the evaluator's independent answer and the cited chunks. It writes a concise

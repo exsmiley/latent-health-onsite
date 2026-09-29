@@ -26,6 +26,13 @@ SEARCH_TOOLS = {"semantic_search", "keyword_search"}
 ANSWER_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "question": {
+            "type": "string",
+            "description": (
+                "The user's latest question rewritten to stand alone: resolve pronouns and "
+                "references to earlier messages. Repeat it unchanged if it already stands alone."
+            ),
+        },
         "status": {
             "type": "string",
             "enum": ["answered", "not_found"],
@@ -50,7 +57,7 @@ ANSWER_SCHEMA: dict = {
             ),
         },
     },
-    "required": ["status", "answer", "citations", "reason"],
+    "required": ["question", "status", "answer", "citations", "reason"],
     "additionalProperties": False,
 }
 
@@ -91,6 +98,9 @@ preferably in the same turn as other useful calls. Don't give up because of an e
 ## How to answer
 You finish by replying WITHOUT calling any tool. That reply is your final answer and must be \
 a JSON object with exactly these fields:
+- `question`: the user's latest question rewritten to stand alone, e.g. "When did she die?" \
+after a question about Marie Curie becomes "When did Marie Curie die?". The evaluator sees only \
+this question and your cited chunks, never the conversation, so it must be self-contained.
 - `status`: "answered" or "not_found".
 - `answer`: for "answered", a complete, direct answer to the question. "" for "not_found".
 - `citations`: for "answered", the chunk ids that support the answer. [] for "not_found".
@@ -151,6 +161,7 @@ citations."""
 
 @dataclass
 class Submission:
+    question: str  # the standalone question the evaluator checks the answer against
     answer: str
     citations: list[int]
     chunks: list[Chunk]  # same order as `citations`
@@ -233,7 +244,7 @@ class ResearchAgent:
                 "(semantic_search and keyword_search) first."
             )
         elif error is None:
-            submission, error = await validate_submission(data)
+            submission, error = await validate_submission(data, fallback_question=self.question)
             if submission is not None:
                 self.submission = submission
                 yield events.research_answer(
@@ -346,8 +357,14 @@ def _parse_answer(raw: str) -> tuple[dict | None, str | None]:
     return data, None
 
 
-async def validate_submission(args: dict) -> tuple[Submission | None, str | None]:
-    """Check an "answered" reply. Returns (submission, None) or (None, error message)."""
+async def validate_submission(
+    args: dict, fallback_question: str
+) -> tuple[Submission | None, str | None]:
+    """Check an "answered" reply. Returns (submission, None) or (None, error message).
+
+    `fallback_question` is used when the reply has no standalone `question`.
+    """
+    question = str(args.get("question") or "").strip() or fallback_question
     answer = args.get("answer")
     citations = args.get("citations")
     if not isinstance(answer, str) or not answer.strip():
@@ -361,7 +378,13 @@ async def validate_submission(args: dict) -> tuple[Submission | None, str | None
         if c not in ids:
             ids.append(c)
 
-    result = await fetch_tool.fetch(chunk_ids=ids, article_ids=[])
+    try:
+        result = await fetch_tool.fetch(chunk_ids=ids, article_ids=[])
+    except Exception as exc:  # noqa: BLE001 - e.g. a DB blip; the agent can simply reply again
+        return None, (
+            f"Your citations couldn't be checked because of a temporary error "
+            f"({type(exc).__name__}). Reply again with the same answer."
+        )
     if result.missing_chunk_ids:
         return None, (
             f"These citations are not valid chunk ids: {sorted(result.missing_chunk_ids)}. "
@@ -372,7 +395,15 @@ async def validate_submission(args: dict) -> tuple[Submission | None, str | None
     missing = [i for i in ids if i not in by_id]
     if missing:
         return None, f"These citations are not valid chunk ids: {missing}."
-    return Submission(answer=answer.strip(), citations=ids, chunks=[by_id[i] for i in ids]), None
+    return (
+        Submission(
+            question=question,
+            answer=answer.strip(),
+            citations=ids,
+            chunks=[by_id[i] for i in ids],
+        ),
+        None,
+    )
 
 
 def retry_feedback(evaluator_feedback: str, independent_answer: str, turns_left: int) -> str:
