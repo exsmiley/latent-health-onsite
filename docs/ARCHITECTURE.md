@@ -129,12 +129,15 @@ out of turns ──► fixed "couldn't find" reply
   and "premise_false", `answer` and chunk-id `citations` are required and `reason` is ""; for
   "not_found", `reason` says what was searched and what was missing, and `answer`/`citations`
   are empty. "premise_false" means the cited chunks contradict an assumption of the question
-  (e.g. "Who is the prince of Azerbaijan?" when it is a republic with a president): `answer`
-  corrects the premise and gives the closest true answer the corpus has, and the citations back
-  the contradicting facts and that answer. It is used only when read chunks contradict the
-  premise; a fact that is merely absent is "not_found". It may answer after any turn. A
-  "not_found" or "premise_false" is rejected (fed back as an error) until at least one search
-  has run. The system prompt must explain that:
+  (e.g. "Who is the king of X?" when X is a republic with a president): `answer` corrects the
+  premise and gives the closest true answer the corpus has (the corrected fact the user was
+  after: the real holder of a superlative, the real date of the named event, the real office
+  and its holder, and former or historical holders of the title, including in same-named
+  regions), and the citations back the contradicting facts and that answer. It is used only
+  when read chunks contradict the premise; a fact that is merely absent is "not_found". It may
+  answer after any turn. A "not_found" is rejected (fed back as an error) until at least one
+  search has run (pre-retrieval counts). A "premise_false" is rejected until the model itself
+  has run a search (pre-retrieval does not count), so it looks for the closest true answer. The system prompt must explain that:
   - full-text hits can be cited directly, blurb-only hits must be fetched first, and `seen`
     hits refer to text shown earlier;
   - it should prefer fetching specific chunks over whole articles;
@@ -148,8 +151,9 @@ out of turns ──► fixed "couldn't find" reply
   - it should never guess, and should answer "not_found" after about two turns of fruitless
     focused searching, but first broaden (related titles, synonyms, historical senses such as
     "crown prince", "governor of", the dynasty) rather than rephrase the same phrase;
-  - when a name has several referents in the corpus, it answers the main readings briefly, or
-    the likeliest one and names the alternative;
+  - when a name has several well-known referents, it always mentions the main alternative
+    (the main readings briefly, or the likeliest one plus the alternative with its key fact),
+    and searches for the other referents instead of answering from the starting evidence;
   - when the chunks contradict the question's premise, it answers "premise_false";
   - it should answer as early as the evidence allows.
   Before each turn a developer note gives the remaining turns. The last one says that tool calls
@@ -162,9 +166,9 @@ out of turns ──► fixed "couldn't find" reply
   `{requirements: str, independent_answer: str, verdict: "supported" | "unsupported", feedback:
   str}`. Its input is the user's original latest question (plus, for follow-ups, the agent's
   references-resolved version, which may only replace pronouns and references), the cited chunk
-  texts and the candidate answer. It first lists the question's requirements (every link of the
-  chain it describes, every constraint and compared entity, and exactly what is asked: which
-  entity, at which hop), then answers from the cited chunk texts alone, checking that the
+  texts and the candidate answer. It first lists the question's requirements as a numbered hop
+  list ("hop 1: ...; hop N: ...", constraints, compared entities, "the answer must be the
+  entity at hop N"), then answers from the cited chunk texts alone, checking that the
   passages establish EACH link. A final fact backed by the passages is not enough unless they
   also show it belongs to the thing the question describes. A link backed only by the
   candidate's claims or by outside knowledge, a compared entity without evidence, or an answer a
@@ -173,20 +177,25 @@ out of turns ──► fixed "couldn't find" reply
   are self-identifying: "He was born in 1879" under "Albert Einstein" names its subject. The
   prompt says the heading resolves identity only and is not evidence for any other fact. It
   unpacks nested "the X of the Y of Z" phrases from the inside out, one hop per "of", and checks
-  that the answer is the outermost entity. A direct possessive or description ("Gustave
-  Eiffel's company") is enough for a naming or ownership link. An answer to an ambiguous
-  question that covers the main readings, or the likeliest one plus the alternative, is
-  acceptable. The candidate answer is labelled with its type; a premise correction is
+  that the answer is the entity at the last hop. A direct possessive or description ("X's
+  company") is enough for a naming or ownership link. An answer to an ambiguous question that
+  covers the main readings, or the likeliest one plus the alternative, is acceptable; one that
+  silently picks a reading when the passages show another referent is incomplete
+  (`unsupported`). The candidate answer is labelled with its type; a premise correction is
   `supported` when the passages establish positive facts contradicting the premise (a negative
-  such as "no prince" may be concluded from "is a republic with a president"), any closest true
-  answer is backed, and the correction addresses the question. The
+  such as "no king" may be concluded from "is a republic with a president"), any closest true
+  answer is backed, and the correction addresses the question; it is incomplete when the
+  passages give the corrected fact the user was after but the answer only negates. Prompt
+  examples use abstract placeholders, never entities from the eval sets. The
   feedback names the missing link or what's contradicted. An empty or malformed
   evaluator reply counts as `unsupported`. A failure while checking citations (e.g. a DB blip)
   is an `invalid` answer the agent can resubmit, not a request error. "Not found"-style
   text in an answer is always `unsupported`.
 - **Responder** (`rag.agents.responder`). A streaming model call that takes the question, the
   research answer, the evaluator's independent answer and the cited chunks. It writes a concise
-  final answer with inline `[n]` markers, where n indexes the citations list. For a verified
+  final answer with inline `[n]` markers, where n indexes the citations list. It keeps every
+  reading, item and part of the verified draft (it may shorten wording, not content). For a
+  verified
   "premise_false" answer it opens with a short correction and then gives the closest true
   answer. It runs only for supported answers (a verified premise correction has outcome
   `supported`). For not found or out of turns, the orchestrator emits an empty `citations`

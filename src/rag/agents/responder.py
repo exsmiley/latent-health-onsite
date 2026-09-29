@@ -20,11 +20,13 @@ the sources.
 - Add inline citation markers like [1] or [2][3] right after the claims they support. n is \
 the source number. Use only numbers that exist in SOURCES, and cite every factual claim.
 - Plain text or light Markdown. No reference list at the end (the app shows the sources).
+- Keep EVERY reading, interpretation, item and part that the draft covers and the SOURCES \
+support. Never drop one, even if it looks secondary: shorten the wording, not the content.
 - If the input says the question's PREMISE IS FALSE, open with a short, polite correction of \
-the premise (one sentence, with citations), then give the closest true answer from the \
-sources. Don't lecture, and don't pretend the premise holds.
-- If the question is ambiguous and the draft covers several readings, keep them short and \
-clearly separated, or answer the likeliest and name the alternative in one sentence."""
+the premise (one sentence, with citations), then give the closest true answer(s) from the \
+draft. Don't lecture, and don't pretend the premise holds.
+- If the question is ambiguous and the draft covers several readings, keep each one, short and \
+clearly separated (or the likeliest first and the alternative in one sentence)."""
 
 
 def build_input(

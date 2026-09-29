@@ -114,8 +114,8 @@ preferably in the same turn as other useful calls. Don't give up because of an e
 You finish by replying WITHOUT calling any tool. That reply is your final answer and must be \
 a JSON object with exactly these fields:
 - `question`: the user's latest question with only pronouns and references to earlier \
-messages resolved, e.g. "When did she die?" after a question about Marie Curie becomes "When \
-did Marie Curie die?". Keep EVERY constraint and step of the user's question: never shorten it \
+messages resolved, e.g. "When did she die?" after a question about person X becomes "When \
+did X die?". Keep EVERY constraint and step of the user's question: never shorten it \
 to a sub-question or to the last hop of a chain, and never replace a described entity with the \
 one you think it is ("the river that flows through the city where X was born" stays as it is). \
 The evaluator checks your answer against the user's own question.
@@ -142,9 +142,9 @@ repeat those searches.
 
 These chunks were picked because they resemble the question, not because they answer it, so \
 check before answering on your first turn:
-- Walk the chain. Write out every step the question needs (e.g. "the teacher of the teacher of \
-Alexander's tutor": tutor → the tutor's teacher → THAT person's teacher) and confirm each step \
-is stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
+- Walk the chain. Write out every step the question needs (e.g. "the mentor of the mentor of \
+X's coach": X's coach → the coach's mentor → THAT person's mentor) and confirm each step is \
+stated in a chunk you have read. A chunk that answers an earlier step is not the answer.
 - Cover every part. For lists and comparisons, make sure you have each item or each side, not \
 just the ones that happened to come up.
 - Take facts about a subject from its own article. If a number or date about X comes from \
@@ -171,26 +171,47 @@ article) find nothing that answers the question, reply with status "not_found". 
 rephrasing the same search, and never search for guessed answers (e.g. candidate names).
 6. Broaden before giving up. If the exact phrase finds nothing, the fact may be filed under \
 another name: try related article titles, synonyms, and older or historical senses of the \
-term (for "prince of X": "crown prince", "governor of X", "ruler of X", the ruling dynasty or \
-the region's history article). Change the angle; don't just reword the same phrase.
+term (for a title or office: heirs, governors, rulers, former holders, the ruling family, or \
+the history article of the place). Change the angle; don't just reword the same phrase.
 
 ## False premises
-Some questions assume something the sources contradict (e.g. "Who is the prince of \
-Azerbaijan?" when Azerbaijan is a republic with a president). Then reply with status \
-"premise_false": in `answer`, say briefly what is actually the case, then give the closest true \
-answer the sources have (e.g. the Qajar crown princes who governed Iran's Azerbaijan province), \
-and cite chunks that state the contradicting facts and the closest answer. Positive facts that \
-rule the premise out ("is a republic", "its head of state is the president") are the evidence; \
-you don't need a chunk saying "there is no prince". Use "premise_false" ONLY when chunks you \
+Some questions assume something the sources contradict (e.g. "Who is the king of X?" when X is \
+a republic with a president, or "What did Y say when he landed on Z?" when Y never went to Z). \
+Then reply with status "premise_false". The starting evidence usually shows the premise is \
+wrong, but it rarely holds the rest of the answer, so a premise correction is only accepted \
+after you have run a search yourself: use it for the CLOSEST TRUE ANSWER, i.e. the corrected \
+version of what the user was really asking. For each false detail, find the true one:
+- a false superlative or ranking: the entity that actually holds it ("the smallest is W");
+- a wrong date or a reversed event: what really happened then, and when the event the user \
+named really happened (built in year A, taken down in year B);
+- a title or office that doesn't exist there: the real equivalent office and its holder, AND \
+former or historical holders of that title. Place names are often shared (a country, a \
+historical region, a province of another state), so search the title with the place and \
+with its variants (heir, crown, governor, ruler) and the place's history, and include holders \
+of the title in a same-named region;
+- a wrong place, person or thing: the one the user probably meant, and its answer.
+In `answer`, (1) say briefly what is actually the case, then (2) give the closest true \
+answer(s) the sources have. Cite chunks for both. Correcting the premise alone is only half an \
+answer: if any chunk you have seen names people who held the title (or the event, record or \
+office the user meant) in the past, in a historical state, or in a same-named region or \
+province of another country, include them ("Historically, A and B held that title as rulers \
+of the region of the same name in <state>"), even if that is not the country the user named. Positive facts that rule the \
+premise out ("is a republic", "its head of state is the president") are the evidence; you \
+don't need a chunk saying "there is no king". Use "premise_false" ONLY when chunks you \
 have read contradict the premise, never just because you found nothing. If the fact is simply \
 absent, that's "not_found".
 
 ## Ambiguous questions
-If a name or term in the question has several referents in the corpus (two people, a city and \
-a river, a band and an album), don't silently pick one. Either answer the main readings \
-briefly ("Georgia the country ...; the US state ..."), or answer the likeliest and name the \
-alternative in one sentence. Cite the chunks for each reading you answer. Use status \
-"answered".
+If a name or term in the question has several well-known referents (two people with the same \
+name, places with the same name in different countries, successive holders of a name who differ \
+only by a number, a city and a river), ALWAYS mention the main alternative, even when one \
+reading clearly dominates. Either answer the main readings briefly ("X in country A ...; X in \
+country B ..."), or answer the likeliest and add one sentence giving the other reading with \
+its key fact. The starting evidence is ranked by similarity and usually shows only the \
+dominant reading, so don't answer a bare, commonly shared name (a place name, a title plus a \
+first name, a surname shared by famous people) from it alone: search for the other referents \
+first ("<name> <other country>", "<name> I", "<name> II"), and cite a chunk for each reading \
+you mention. Use status "answered".
 
 ## Never guess
 Never answer with anything that the chunks you have read don't state. A made-up or inferred \
@@ -209,14 +230,14 @@ kinds of question need more, because "fully support" covers every step:
   - Chains: cite a chunk for EVERY hop. The evaluator checks each link of the chain the question \
 describes, from the first entity to the answer. Knowing an intermediate entity yourself is not \
 evidence; if no cited chunk shows a link, the answer is rejected. E.g. for "On which river is \
-the birthplace of the 1921 physics Nobel winner?", cite the chunk saying Einstein won the 1921 \
-prize, the one saying he was born in Ulm, and the one saying Ulm is on the Danube.
+the birthplace of the winner of prize P in year Y?", cite the chunk saying person X won P in \
+Y, the one saying X was born in city C, and the one saying C is on river R.
   - Comparisons, superlatives ("oldest", "longest", "first"), counts and "which of these" \
 questions: cite evidence for EVERY entity compared or counted, not just the winner. The \
 evaluator can't confirm "the oldest" without every entity's date.
 - The evaluator sees each cited chunk under its "title > section" heading (the same title and \
-section that fetch shows), so a chunk from the article "Albert Einstein" that says "He was \
-born in 1879" is enough to show when Einstein was born. Chunks don't carry any other context \
+section that fetch shows), so a chunk from the article about person X that says "He was \
+born in 1879" is enough to show when X was born. Chunks don't carry any other context \
 from neighbouring chunks.
 - Only put in the answer what the cited text supports.
 
@@ -260,6 +281,7 @@ class ResearchAgent:
     submission: Submission | None = None
     not_found: str | None = None  # the reason, for an accepted "not_found"
     searched: bool = False  # a search tool has run in this conversation
+    own_search: bool = False  # the model itself has called a search tool (not pre-retrieval)
     shown: set[int] = field(default_factory=set)  # chunk ids whose full text the model has seen
     turns_used: int = 0
     has_history: bool = False  # earlier user/assistant messages precede the question
@@ -395,10 +417,12 @@ class ResearchAgent:
                 'You replied "not_found" without searching. Search the index '
                 "(semantic_search and keyword_search) first."
             )
-        elif error is None and data["status"] == "premise_false" and not self.searched:
+        elif error is None and data["status"] == "premise_false" and not self.own_search:
             error = (
-                'You replied "premise_false" without searching. Search the index for evidence '
-                "that contradicts the premise first."
+                'A "premise_false" answer needs a search of your own first (the starting '
+                "evidence doesn't count). Search for the closest true answer: what the user "
+                "was really asking, with the false detail corrected (the real holder, date, "
+                "event or office, and former holders of the title), then reply again."
             )
         elif error is None:
             submission, error = await validate_submission(data, fallback_question=self.question)
@@ -477,6 +501,7 @@ class ResearchAgent:
             return _CallOutcome(_error_json(f"Unknown tool {call.name!r}."), "error: unknown tool")
         if call.name in SEARCH_TOOLS:
             self.searched = True
+            self.own_search = True
         try:
             result = await registry.dispatch(call.name, args)
         except Exception as exc:  # noqa: BLE001 - the model gets the error and can adapt

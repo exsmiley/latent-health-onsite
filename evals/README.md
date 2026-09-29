@@ -478,8 +478,9 @@ correct in B) or broken, and the largest per-question time changes.
 - **q026:** "the last 100 years" is relative to when the article was written.
 
 **Pinned or inferred answers:**
-- **q071:** the corpus never says outright that Olga Koklova is Paul's mother. It follows from the
-  1918 marriage, Paul's birth in 1921 and the 1935 divorce. The corpus spelling is "Koklova".
+- **q071:** the corpus never says outright that Olga Koklova is Paul's mother, so the question
+  asks whom Picasso married three years before his only legitimate son was born (married 1918,
+  "one year" after meeting her in 1917; Paul born 1921). The corpus spelling is "Koklova".
 - **q059:** the Statue of Liberty article credits Maurice Koechlin, chief engineer of Eiffel's
   company, with the internal structure, while the Gustave Eiffel article credits Eiffel himself.
   The question is worded so both readings give 1832.

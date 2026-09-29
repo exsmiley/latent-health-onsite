@@ -25,6 +25,7 @@ from rag.agents.evaluator import evaluate, format_question
 from rag.agents.orchestrator import NOT_FOUND_MESSAGE
 from rag.agents.research import ANSWER_SCHEMA
 from rag.agents.research import SYSTEM_PROMPT as RESEARCH_PROMPT
+from rag.agents.responder import SYSTEM_PROMPT as RESPONDER_PROMPT
 from rag.agents.responder import build_input as responder_build_input
 from rag.config import get_settings
 from rag.tools import fetch as fetch_tool
@@ -663,7 +664,7 @@ async def test_premise_false_before_any_search_is_rejected(fake_env):
     evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
     answers = only(evs, "research_answer")
     assert [a["status"] for a in answers] == ["invalid", "premise_false"]
-    assert "without searching" in answers[0]["reason"]
+    assert "needs a search of your own" in answers[0]["reason"]
     assert only(evs, "outcome")[0]["result"] == "supported"
 
 
@@ -704,14 +705,18 @@ def test_prompts_cover_premises_ambiguity_broadening_hops_and_naming():
     assert "## Ambiguous questions" in ev
     assert "names the alternative" in ev
     assert 'from the INSIDE OUT, one hop per "of"' in ev
-    assert "outermost" in ev
+    assert "NUMBERED HOP" in ev and "the entity at hop N" in ev
+    assert "never merge two hops into one" in ev
+    assert "silently picks one reading" in ev
     assert 'don\'t demand the literal phrase "named after"' in ev
     rp = RESEARCH_PROMPT
     assert "## False premises" in rp
     assert 'Use "premise_false" ONLY when chunks you have read contradict the premise' in rp
     assert 'that\'s "not_found"' in rp
     assert "## Ambiguous questions" in rp
-    assert "Broaden before giving up" in rp and "crown prince" in rp
+    assert "Broaden before giving up" in rp and "former holders" in rp
+    assert "CLOSEST TRUE" in rp
+    assert "ALWAYS mention the main alternative" in rp
     assert ANSWER_SCHEMA["properties"]["status"]["enum"] == [
         "answered",
         "premise_false",
@@ -719,3 +724,66 @@ def test_prompts_cover_premises_ambiguity_broadening_hops_and_naming():
     ]
     assert "Correct it" in responder_build_input("q", "a", None, [], premise_false=True)
     assert "PREMISE IS FALSE" not in responder_build_input("q", "a", None, [])
+
+
+def test_responder_keeps_every_confirmed_reading():
+
+    assert "Keep EVERY reading, interpretation, item and part" in RESPONDER_PROMPT
+    assert "Never drop one" in RESPONDER_PROMPT
+
+
+def test_prompts_use_no_entities_from_the_eval_sets():
+    """Guard against overfitting: prompt examples stay abstract."""
+
+    names = [
+        "Azerbaijan",
+        "Qajar",
+        "Elizabeth",
+        "Birmingham",
+        "John Paul",
+        "Johnson",
+        "Armstrong",
+        "Canada",
+        "France",
+        "Picasso",
+        "Alexander",
+        "Aristotle",
+        "Plato",
+        "Socrates",
+        "Eiffel",
+        "Einstein",
+        "Curie",
+        "Liszt",
+        "Mozart",
+        "Georgia",
+        "Neckar",
+        "Danube",
+    ]
+    for prompt in (RESEARCH_PROMPT, EVALUATOR_PROMPT, RESPONDER_PROMPT):
+        assert [n for n in names if n in prompt] == []
+
+
+async def test_premise_false_needs_own_search_even_after_pre_retrieval(fake_env):
+    """The starting evidence rarely holds the closest true answer: search for it first."""
+    fake_env(
+        [
+            premise_false(CORRECTION, [102]),
+            search("closest true answer"),
+            premise_false(CORRECTION, [102]),
+            verdict("supported"),
+            Stream(["ok"]),
+        ],
+        pre_retrieve=True,
+    )
+    evs = await collect("When did Einstein win the Nobel Prize in Chemistry?")
+    answers = only(evs, "research_answer")
+    assert [a["status"] for a in answers] == ["invalid", "premise_false"]
+    assert "closest true answer" in answers[0]["reason"]
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 3}]
+
+
+async def test_answered_and_not_found_still_allowed_right_after_pre_retrieval(fake_env):
+    fake_env([answer("1879", [101]), verdict("supported"), Stream(["ok"])], pre_retrieve=True)
+    evs = await collect("When was Albert Einstein born?")
+    assert [a["status"] for a in only(evs, "research_answer")] == ["answered"]
+    assert only(evs, "outcome") == [{"result": "supported", "turns_used": 1}]
