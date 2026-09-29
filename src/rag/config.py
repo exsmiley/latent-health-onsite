@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     hit_full_text: int = 3  # new hits per query shown with full text (the rest get blurbs)
     hit_text_budget_tokens: int = 5000  # cap on full hit text per research turn
 
+    # Evals: where `rag eval` writes runs, and where the API's Evals tab reads them
+    eval_results_dir: Path = ROOT / "evals" / "results"
+
 
 @lru_cache
 def get_settings() -> Settings:
